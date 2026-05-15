@@ -690,29 +690,35 @@ if __name__ == '__main__':
             ])
         print_markdown_table(headers, rows)
         
-        print("\n=== Throughput/Chip Sorted Table ===")
-        headers = ["Strategy", "Phase", "Batch Size", "Throughput/Chip", "Total Latency (ms)", "Bound By"]
+        print("\n=== Prefill Throughput/Chip Sorted Table ===")
+        headers = ["Strategy", "Batch Size", "Throughput/Chip", "Total Latency (ms)", "Bound By"]
         
-        combined_results = []
-        for strategy_str, batch, res in prefill_results:
-            combined_results.append(("Prefill", batch, strategy_str, res))
-        for strategy_str, batch, res in decode_results:
-            combined_results.append(("Decode", batch, strategy_str, res))
-            
-        combined_results.sort(key=lambda x: x[3]['throughput_per_chip'], reverse=True)
-        
-        sorted_rows = []
-        for phase, batch, strategy_str, res in combined_results:
-            sorted_rows.append([
+        prefill_sorted = sorted(prefill_results, key=lambda x: x[2]['throughput_per_chip'], reverse=True)
+        rows = []
+        for strategy_str, batch, res in prefill_sorted:
+            rows.append([
                 strategy_str,
-                phase,
                 batch,
                 f"{res['throughput_per_chip']:.2f}",
                 f"{res['total_latency_ms']:.2f}",
                 res['bound_by']
             ])
-            
-        print_markdown_table(headers, sorted_rows)
+        print_markdown_table(headers, rows)
+        
+        print("\n=== Decode Throughput/Chip Sorted Table ===")
+        headers = ["Strategy", "Batch Size", "Throughput/Chip", "Total Latency (ms)", "Bound By"]
+        
+        decode_sorted = sorted(decode_results, key=lambda x: x[2]['throughput_per_chip'], reverse=True)
+        rows = []
+        for strategy_str, batch, res in decode_sorted:
+            rows.append([
+                strategy_str,
+                batch,
+                f"{res['throughput_per_chip']:.2f}",
+                f"{res['total_latency_ms']:.2f}",
+                res['bound_by']
+            ])
+        print_markdown_table(headers, rows)
     else:
         for strategy_str, res in prefill_results:
             print(f"\n=== Strategy: {strategy_str} ===")
