@@ -248,6 +248,29 @@ def calculate_memory_access(config: ModelConfig, seq_len: int, batch_size: int, 
         
         return float(total_weights + kv_read + kv_write)
 
+def calculate_kv_cache_size(config: ModelConfig, seq_len: int, batch_size: int) -> float:
+    '''Calculates the total memory capacity needed for the KV cache.
+
+    Args:
+        config: Model configuration.
+        seq_len: Sequence length.
+        batch_size: Batch size.
+
+    Returns:
+        Total bytes needed for KV cache across all layers.
+    '''
+    if config.kv_cache_precision == 'fp8':
+        bytes_per_kv_param = 1
+    elif config.kv_cache_precision == 'bf16':
+        bytes_per_kv_param = 2
+    else:
+        raise ValueError(f"Unsupported kv_cache_precision: {config.kv_cache_precision}")
+        
+    kv_hidden = config.num_kv_heads * config.attn_head_dim
+    # Factor of 2 for K and V
+    return float(2 * batch_size * seq_len * kv_hidden * bytes_per_kv_param * config.num_layers)
+
+
 def calculate_roofline(config: ModelConfig, hardware: HardwareSpec, seq_len: int, batch_size: int, is_prefill: bool) -> Dict[str, Any]:
     '''Calculates the roofline performance and latency.
 
@@ -278,13 +301,16 @@ def calculate_roofline(config: ModelConfig, hardware: HardwareSpec, seq_len: int
     
     roofline_latency = max(compute_latency, memory_latency)
     
+    kv_cache_size = calculate_kv_cache_size(config, seq_len, batch_size)
+    
     return {
         'flops': total_flops,
         'mem_access_bytes': mem_access,
         'compute_latency_ms': compute_latency * 1000,
         'memory_latency_ms': memory_latency * 1000,
         'roofline_latency_ms': roofline_latency * 1000,
-        'bound_by': 'compute' if compute_latency > memory_latency else 'memory'
+        'bound_by': 'compute' if compute_latency > memory_latency else 'memory',
+        'kv_cache_size_gb': kv_cache_size / 1e9
     }
 
 if __name__ == '__main__':
