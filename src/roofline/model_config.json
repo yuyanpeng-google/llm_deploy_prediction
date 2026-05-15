@@ -1,0 +1,13 @@
+{
+  "hidden_size": 6144,
+  "num_q_heads": 96,
+  "num_kv_heads": 8,
+  "attn_head_dim": 128,
+  "num_layers": 62,
+  "vocab_size": 151936,
+  "num_experts": 160,
+  "num_activated_experts": 8,
+  "intermediate_size": 2560,
+  "bytes_per_param": 1,
+  "attn_precision": "w8a16"
+}
