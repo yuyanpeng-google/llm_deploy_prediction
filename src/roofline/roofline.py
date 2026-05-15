@@ -245,6 +245,7 @@ def calculate_memory_access(config: ModelConfig, seq_len: int, global_batch_size
     D = config.attn_head_dim
     E = config.num_experts
     I = config.intermediate_size
+    K = config.num_activated_experts
     bytes_per_param = config.bytes_per_param
     
     kv_hidden = N_kv * D
@@ -266,12 +267,21 @@ def calculate_memory_access(config: ModelConfig, seq_len: int, global_batch_size
     else:
         raise ValueError(f"Unsupported kv_cache_precision: {config.kv_cache_precision}")
         
+    # Activation access: Read input, Write after Attn, Read before MoE, Write after MoE
+    # Approx 4 accesses to the activation tensor of size B * (S if is_prefill else 1) * H
+    S_eff = S if is_prefill else 1
+    activation_access = 4 * B * S_eff * H * bytes_per_param
+    
+    # MoE intermediate activation access (not fused): Read and Write between gate_up and down
+    # Size: B * S_eff * K * I
+    moe_inter_access = 2 * B * S_eff * K * I * bytes_per_param
+    
     if is_prefill:
         # Read weights (once per layer)
         # Write KV cache for S tokens
         kv_write = 2 * B * S * kv_hidden * bytes_per_kv_param
         
-        return float(total_weights + kv_write)
+        return float(total_weights + kv_write + activation_access + moe_inter_access)
     else:
         # Decode
         # Read weights (for every token step)
@@ -280,7 +290,7 @@ def calculate_memory_access(config: ModelConfig, seq_len: int, global_batch_size
         # Write new KV cache for 1 token
         kv_write = 2 * B * 1 * kv_hidden * bytes_per_kv_param
         
-        return float(total_weights + kv_read + kv_write)
+        return float(total_weights + kv_read + kv_write + activation_access + moe_inter_access)
 
 def calculate_communication_latency(config: ModelConfig, strategy: ShardingStrategy, hardware: HardwareSpec, seq_len: int, global_batch_size: int, is_prefill: bool) -> float:
     '''Calculates the communication latency in seconds for a single layer.
