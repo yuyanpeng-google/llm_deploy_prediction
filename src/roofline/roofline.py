@@ -542,15 +542,17 @@ if __name__ == '__main__':
     parser.add_argument('--model_config', type=str, help='Path to model config JSON file.')
     parser.add_argument('--hardware_spec', type=str, nargs='+', help='Path to hardware spec JSON file(s).')
     parser.add_argument('--seq_len', type=int, default=1024, help='Sequence length.')
-    parser.add_argument('--prefill_batch_size', type=int, default=1, help='Batch size for prefill phase.')
-    parser.add_argument('--decode_batch_size', type=int, default=1, help='Batch size for decode phase.')
+    prefill_group = parser.add_mutually_exclusive_group()
+    prefill_group.add_argument('--prefill_batch_size', type=int, default=1, help='Global batch size for prefill phase. Conflicts with --prefill_local_batch_size.')
+    prefill_group.add_argument('--prefill_local_batch_size', type=int, help='Local batch size per DP group for prefill phase. Conflicts with --prefill_batch_size.')
+    
+    decode_group = parser.add_mutually_exclusive_group()
+    decode_group.add_argument('--decode_batch_size', type=int, default=1, help='Global batch size for decode phase. Conflicts with --decode_local_batch_size.')
+    decode_group.add_argument('--decode_local_batch_size', type=int, help='Local batch size per DP group for decode phase. Conflicts with --decode_batch_size.')
     parser.add_argument('--table', action='store_true', help='Output results in markdown table format.')
     parser.add_argument('--num_chips', type=int, default=4, help='Number of chips for grid search (fallback if not in spec).')
     
     args = parser.parse_args()
-    
-    prefill_batch = args.prefill_batch_size
-    decode_batch = args.decode_batch_size
     
     if args.model_config:
         model_cfg = load_model_config(args.model_config)
@@ -606,15 +608,25 @@ if __name__ == '__main__':
         for strategy in strategies:
             strategy_str = f"Spec={spec_name}, Chips={strategy.num_chips}, Attn(TP={strategy.attn_tp_degree},DP={strategy.attn_dp_degree}), MoE(TP={strategy.moe_tp_degree},EP={strategy.moe_ep_degree})"
             
+            if args.prefill_local_batch_size is not None:
+                prefill_batch = args.prefill_local_batch_size * strategy.attn_dp_degree
+            else:
+                prefill_batch = args.prefill_batch_size
+                
+            if args.decode_local_batch_size is not None:
+                decode_batch = args.decode_local_batch_size * strategy.attn_dp_degree
+            else:
+                decode_batch = args.decode_batch_size
+                
             try:
                 prefill_res = calculate_roofline(model_cfg, hw_spec, seq_len=args.seq_len, batch_size=prefill_batch, is_prefill=True, strategy=strategy)
-                prefill_results.append((strategy_str, prefill_res))
+                prefill_results.append((strategy_str, prefill_batch, prefill_res))
             except ValueError as e:
                 print(f"Error calculating prefill for {strategy_str}: {e}")
                 
             try:
                 decode_res = calculate_roofline(model_cfg, hw_spec, seq_len=args.seq_len, batch_size=decode_batch, is_prefill=False, strategy=strategy)
-                decode_results.append((strategy_str, decode_res))
+                decode_results.append((strategy_str, decode_batch, decode_res))
             except ValueError as e:
                 print(f"Error calculating decode for {strategy_str}: {e}")
 
@@ -622,10 +634,10 @@ if __name__ == '__main__':
         print("\n=== Prefill Phase Table ===")
         headers = ["Strategy", "Batch Size", "Throughput/Chip", "TTFT (ms)", "Bound By", "Total Latency (ms)", "KV Cache (GB)"]
         rows = []
-        for strategy_str, res in prefill_results:
+        for strategy_str, batch, res in prefill_results:
             rows.append([
                 strategy_str,
-                prefill_batch,
+                batch,
                 f"{res['throughput_per_chip']:.2f}",
                 f"{res['ttft_ms']:.2f}",
                 res['bound_by'],
@@ -637,10 +649,10 @@ if __name__ == '__main__':
         print("\n=== Decode Phase Table ===")
         headers = ["Strategy", "Batch Size", "Throughput/Chip", "TPOT (ms)", "Bound By", "Total Latency (ms)", "KV Cache (GB)"]
         rows = []
-        for strategy_str, res in decode_results:
+        for strategy_str, batch, res in decode_results:
             rows.append([
                 strategy_str,
-                decode_batch,
+                batch,
                 f"{res['throughput_per_chip']:.2f}",
                 f"{res['tpot_ms']:.2f}",
                 res['bound_by'],
@@ -652,24 +664,24 @@ if __name__ == '__main__':
         print("\n=== Latency Comparison Table ===")
         headers = ["Strategy", "Phase", "Batch Size", "Compute Latency (ms)", "Memory Latency (ms)", "ICI Latency (ms)", "Gap (ms)", "Bound By"]
         rows = []
-        for strategy_str, res in prefill_results:
+        for strategy_str, batch, res in prefill_results:
             gap = abs(res['compute_latency_ms'] - res['memory_latency_ms'])
             rows.append([
                 strategy_str,
                 "Prefill",
-                prefill_batch,
+                batch,
                 f"{res['compute_latency_ms']:.2f}",
                 f"{res['memory_latency_ms']:.2f}",
                 f"{res['comm_latency_ms']:.2f}",
                 f"{gap:.2f}",
                 res['bound_by']
             ])
-        for strategy_str, res in decode_results:
+        for strategy_str, batch, res in decode_results:
             gap = abs(res['compute_latency_ms'] - res['memory_latency_ms'])
             rows.append([
                 strategy_str,
                 "Decode",
-                decode_batch,
+                batch,
                 f"{res['compute_latency_ms']:.2f}",
                 f"{res['memory_latency_ms']:.2f}",
                 f"{res['comm_latency_ms']:.2f}",
@@ -682,10 +694,10 @@ if __name__ == '__main__':
         headers = ["Strategy", "Phase", "Batch Size", "Throughput/Chip", "Total Latency (ms)", "Bound By"]
         
         combined_results = []
-        for strategy_str, res in prefill_results:
-            combined_results.append(("Prefill", prefill_batch, strategy_str, res))
-        for strategy_str, res in decode_results:
-            combined_results.append(("Decode", decode_batch, strategy_str, res))
+        for strategy_str, batch, res in prefill_results:
+            combined_results.append(("Prefill", batch, strategy_str, res))
+        for strategy_str, batch, res in decode_results:
+            combined_results.append(("Decode", batch, strategy_str, res))
             
         combined_results.sort(key=lambda x: x[3]['throughput_per_chip'], reverse=True)
         
