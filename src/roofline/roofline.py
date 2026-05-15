@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from typing import Dict, Any, List
 import json
 import argparse
+import os
+import glob
 
 @dataclass
 class ModelConfig:
@@ -67,6 +69,9 @@ class HardwareSpec:
     
     ici_a2a_bandwidth: float
     '''Unidirectional ICI bandwidth for All-to-All in GB/s.'''
+    
+    num_chips: int = 4
+    '''Number of chips associated with this spec.'''
 
 @dataclass
 class ShardingStrategy:
@@ -535,12 +540,12 @@ def generate_strategies(num_chips: int) -> List[ShardingStrategy]:
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Calculate roofline for LLM deployment.')
     parser.add_argument('--model_config', type=str, help='Path to model config JSON file.')
-    parser.add_argument('--hardware_spec', type=str, help='Path to hardware spec JSON file.')
+    parser.add_argument('--hardware_spec', type=str, nargs='+', help='Path to hardware spec JSON file(s).')
     parser.add_argument('--seq_len', type=int, default=1024, help='Sequence length.')
     parser.add_argument('--prefill_batch_size', type=int, default=1, help='Batch size for prefill phase.')
     parser.add_argument('--decode_batch_size', type=int, default=1, help='Batch size for decode phase.')
     parser.add_argument('--table', action='store_true', help='Output results in markdown table format.')
-    parser.add_argument('--num_chips', type=int, default=4, help='Number of chips for grid search.')
+    parser.add_argument('--num_chips', type=int, default=4, help='Number of chips for grid search (fallback if not in spec).')
     
     args = parser.parse_args()
     
@@ -566,37 +571,52 @@ if __name__ == '__main__':
             kv_cache_precision='fp8'
         )
         
+    hw_specs = []
+    spec_paths = []
     if args.hardware_spec:
-        hw_spec = load_hardware_spec(args.hardware_spec)
+        for spec_path in args.hardware_spec:
+            if os.path.isdir(spec_path):
+                json_files = glob.glob(os.path.join(spec_path, "*.json"))
+                json_files.sort()
+                for json_file in json_files:
+                    hw_specs.append(load_hardware_spec(json_file))
+                    spec_paths.append(json_file)
+            else:
+                hw_specs.append(load_hardware_spec(spec_path))
+                spec_paths.append(spec_path)
     else:
         print("Warning: No hardware spec file provided. Using dummy values.")
-        hw_spec = HardwareSpec(
+        hw_specs.append(HardwareSpec(
             peak_bf16_flops=2307.0,
             peak_fp8_flops=4614.0,
             hbm_bandwidth=7380.0,
             ici_ar_ag_bandwidth=600.0,
-            ici_a2a_bandwidth=200.0
-        )
+            ici_a2a_bandwidth=200.0,
+            num_chips=args.num_chips
+        ))
+        spec_paths.append("Default")
         
-    strategies = generate_strategies(args.num_chips)
-    
     prefill_results = []
     decode_results = []
     
-    for strategy in strategies:
-        strategy_str = f"Chips={strategy.num_chips}, Attn(TP={strategy.attn_tp_degree},DP={strategy.attn_dp_degree}), MoE(TP={strategy.moe_tp_degree},EP={strategy.moe_ep_degree})"
+    for hw_spec, spec_path in zip(hw_specs, spec_paths):
+        strategies = generate_strategies(hw_spec.num_chips)
+        spec_name = os.path.basename(spec_path) if spec_path != "Default" else "Default"
         
-        try:
-            prefill_res = calculate_roofline(model_cfg, hw_spec, seq_len=args.seq_len, batch_size=prefill_batch, is_prefill=True, strategy=strategy)
-            prefill_results.append((strategy_str, prefill_res))
-        except ValueError as e:
-            print(f"Error calculating prefill for {strategy_str}: {e}")
+        for strategy in strategies:
+            strategy_str = f"Spec={spec_name}, Chips={strategy.num_chips}, Attn(TP={strategy.attn_tp_degree},DP={strategy.attn_dp_degree}), MoE(TP={strategy.moe_tp_degree},EP={strategy.moe_ep_degree})"
             
-        try:
-            decode_res = calculate_roofline(model_cfg, hw_spec, seq_len=args.seq_len, batch_size=decode_batch, is_prefill=False, strategy=strategy)
-            decode_results.append((strategy_str, decode_res))
-        except ValueError as e:
-            print(f"Error calculating decode for {strategy_str}: {e}")
+            try:
+                prefill_res = calculate_roofline(model_cfg, hw_spec, seq_len=args.seq_len, batch_size=prefill_batch, is_prefill=True, strategy=strategy)
+                prefill_results.append((strategy_str, prefill_res))
+            except ValueError as e:
+                print(f"Error calculating prefill for {strategy_str}: {e}")
+                
+            try:
+                decode_res = calculate_roofline(model_cfg, hw_spec, seq_len=args.seq_len, batch_size=decode_batch, is_prefill=False, strategy=strategy)
+                decode_results.append((strategy_str, decode_res))
+            except ValueError as e:
+                print(f"Error calculating decode for {strategy_str}: {e}")
 
     if args.table:
         print("\n=== Prefill Phase Table ===")
@@ -657,6 +677,30 @@ if __name__ == '__main__':
                 res['bound_by']
             ])
         print_markdown_table(headers, rows)
+        
+        print("\n=== Throughput/Chip Sorted Table ===")
+        headers = ["Strategy", "Phase", "Batch Size", "Throughput/Chip", "Total Latency (ms)", "Bound By"]
+        
+        combined_results = []
+        for strategy_str, res in prefill_results:
+            combined_results.append(("Prefill", prefill_batch, strategy_str, res))
+        for strategy_str, res in decode_results:
+            combined_results.append(("Decode", decode_batch, strategy_str, res))
+            
+        combined_results.sort(key=lambda x: x[3]['throughput_per_chip'], reverse=True)
+        
+        sorted_rows = []
+        for phase, batch, strategy_str, res in combined_results:
+            sorted_rows.append([
+                strategy_str,
+                phase,
+                batch,
+                f"{res['throughput_per_chip']:.2f}",
+                f"{res['total_latency_ms']:.2f}",
+                res['bound_by']
+            ])
+            
+        print_markdown_table(headers, sorted_rows)
     else:
         for strategy_str, res in prefill_results:
             print(f"\n=== Strategy: {strategy_str} ===")
