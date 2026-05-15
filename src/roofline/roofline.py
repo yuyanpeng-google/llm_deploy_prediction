@@ -70,6 +70,9 @@ class HardwareSpec:
     ici_a2a_bandwidth: float
     '''Unidirectional ICI bandwidth for All-to-All in GB/s.'''
     
+    hbm_capacity: float = 192.0
+    '''HBM capacity per chip in GB.'''
+    
     num_chips: int = 4
     '''Number of chips associated with this spec.'''
 
@@ -387,6 +390,45 @@ def calculate_kv_cache_size(config: ModelConfig, seq_len: int, batch_size: int) 
     return float(2 * batch_size * seq_len * kv_hidden * bytes_per_kv_param * config.num_layers)
 
 
+def calculate_weights_storage(config: ModelConfig, strategy: ShardingStrategy) -> float:
+    '''Calculates the model weights storage in bytes per chip.
+
+    Args:
+        config: Model configuration.
+        strategy: Sharding strategy.
+
+    Returns:
+        Weights storage in bytes per chip.
+    '''
+    H = config.hidden_size
+    N_kv = config.num_kv_heads
+    D = config.attn_head_dim
+    E = config.num_experts
+    I = config.intermediate_size
+    bytes_per_param = config.bytes_per_param
+    
+    kv_hidden = N_kv * D
+    q_hidden = config.num_q_heads * config.attn_head_dim
+    
+    # Attention weights (one replica)
+    attn_weights = (2 * H * q_hidden + 2 * H * kv_hidden) * bytes_per_param
+    
+    # Sharded by TP for attention
+    attn_weights_per_chip = attn_weights / strategy.attn_tp_degree
+    
+    # MoE weights
+    # Gating is replicated
+    moe_gating = (H * E) * bytes_per_param
+    # Experts are distributed across all chips (EP * TP = num_chips)
+    moe_experts = (3 * E * H * I) * bytes_per_param
+    
+    moe_weights_per_chip = moe_gating + (moe_experts / strategy.num_chips)
+    
+    total_weights_per_chip = (attn_weights_per_chip + moe_weights_per_chip) * config.num_layers
+    
+    return float(total_weights_per_chip)
+
+
 def calculate_roofline(config: ModelConfig, hardware: HardwareSpec, seq_len: int, batch_size: int, is_prefill: bool, strategy: ShardingStrategy = None) -> Dict[str, Any]:
     '''Calculates the roofline performance and latency.
 
@@ -458,8 +500,19 @@ def calculate_roofline(config: ModelConfig, hardware: HardwareSpec, seq_len: int
     else:
         throughput_per_chip = B / (total_latency * num_chips) if total_latency > 0 else 0.0
         
+    # HBM Usage Calculation
+    effective_strategy = strategy if strategy else ShardingStrategy(num_chips=1)
+    weights_storage = calculate_weights_storage(config, effective_strategy)
+    kv_cache_per_chip = kv_cache_size / num_chips
+    hbm_usage_bytes = weights_storage + kv_cache_per_chip
+    hbm_usage_gb = hbm_usage_bytes / 1e9
+        
     return {
         'flops_per_chip': total_flops,
+        'weights_per_chip_gb': weights_storage / 1e9,
+        'kv_cache_per_chip_gb': kv_cache_per_chip / 1e9,
+        'hbm_usage_gb': hbm_usage_gb,
+        'hbm_capacity_gb': hardware.hbm_capacity,
         'mem_access_bytes_per_chip': mem_access,
         'compute_latency_ms': compute_latency * 1000,
         'memory_latency_ms': memory_latency * 1000,
@@ -690,33 +743,66 @@ if __name__ == '__main__':
             ])
         print_markdown_table(headers, rows)
         
+        print("\n=== HBM Usage Table ===")
+        headers = ["Strategy", "Phase", "Batch Size", "Weights/Chip (GB)", "KV Cache/Chip (GB)", "Total HBM/Chip (GB)", "Capacity (GB)", "Util (%)"]
+        rows = []
+        for strategy_str, batch, res in prefill_results:
+            util = (res['hbm_usage_gb'] / res['hbm_capacity_gb']) * 100 if res['hbm_capacity_gb'] > 0 else 0.0
+            rows.append([
+                strategy_str,
+                "Prefill",
+                batch,
+                f"{res['weights_per_chip_gb']:.2f}",
+                f"{res['kv_cache_per_chip_gb']:.2f}",
+                f"{res['hbm_usage_gb']:.2f}",
+                f"{res['hbm_capacity_gb']:.2f}",
+                f"{util:.2f}"
+            ])
+        for strategy_str, batch, res in decode_results:
+            util = (res['hbm_usage_gb'] / res['hbm_capacity_gb']) * 100 if res['hbm_capacity_gb'] > 0 else 0.0
+            rows.append([
+                strategy_str,
+                "Decode",
+                batch,
+                f"{res['weights_per_chip_gb']:.2f}",
+                f"{res['kv_cache_per_chip_gb']:.2f}",
+                f"{res['hbm_usage_gb']:.2f}",
+                f"{res['hbm_capacity_gb']:.2f}",
+                f"{util:.2f}"
+            ])
+        print_markdown_table(headers, rows)
+        
         print("\n=== Prefill Throughput/Chip Sorted Table ===")
-        headers = ["Strategy", "Batch Size", "Throughput/Chip", "Total Latency (ms)", "Bound By"]
+        headers = ["Strategy", "Batch Size", "Throughput/Chip", "Total Latency (ms)", "Bound By", "HBM Util (%)"]
         
         prefill_sorted = sorted(prefill_results, key=lambda x: x[2]['throughput_per_chip'], reverse=True)
         rows = []
         for strategy_str, batch, res in prefill_sorted:
+            util = (res['hbm_usage_gb'] / res['hbm_capacity_gb']) * 100 if res['hbm_capacity_gb'] > 0 else 0.0
             rows.append([
                 strategy_str,
                 batch,
                 f"{res['throughput_per_chip']:.2f}",
                 f"{res['total_latency_ms']:.2f}",
-                res['bound_by']
+                res['bound_by'],
+                f"{util:.2f}"
             ])
         print_markdown_table(headers, rows)
         
         print("\n=== Decode Throughput/Chip Sorted Table ===")
-        headers = ["Strategy", "Batch Size", "Throughput/Chip", "Total Latency (ms)", "Bound By"]
+        headers = ["Strategy", "Batch Size", "Throughput/Chip", "Total Latency (ms)", "Bound By", "HBM Util (%)"]
         
         decode_sorted = sorted(decode_results, key=lambda x: x[2]['throughput_per_chip'], reverse=True)
         rows = []
         for strategy_str, batch, res in decode_sorted:
+            util = (res['hbm_usage_gb'] / res['hbm_capacity_gb']) * 100 if res['hbm_capacity_gb'] > 0 else 0.0
             rows.append([
                 strategy_str,
                 batch,
                 f"{res['throughput_per_chip']:.2f}",
                 f"{res['total_latency_ms']:.2f}",
-                res['bound_by']
+                res['bound_by'],
+                f"{util:.2f}"
             ])
         print_markdown_table(headers, rows)
     else:
