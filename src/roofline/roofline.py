@@ -333,9 +333,13 @@ def calculate_communication_latency(config: ModelConfig, strategy: ShardingStrat
     P = strategy.moe_ep_degree
     if P > 1 and bw_link_a2a > 0:
         # All-to-All communication to route tokens
-        # Data size moved per chip approx (Total Tokens / moe_ep_degree) * K * H * bytes_per_param
+        # Optimized: Tokens are sent at most once per destination group.
+        # Expected number of remote groups a token visits: (EP - 1) * (1 - (1 - 1/EP)^K)
         K = config.num_activated_experts
-        data_size = (total_tokens / strategy.moe_ep_degree) * K * H * bytes_per_param
+        ep = strategy.moe_ep_degree
+        prob_visit_remote = 1 - (1 - 1/ep)**K
+        data_size = (total_tokens / ep) * (ep - 1) * prob_visit_remote * H * bytes_per_param
+        
         # All-to-All latency approx data_size / bw_link
         comm_latency += data_size / 1e9 / bw_link_a2a
         
