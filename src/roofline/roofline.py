@@ -333,10 +333,14 @@ def calculate_communication_latency(config: ModelConfig, strategy: ShardingStrat
     P = strategy.moe_ep_degree
     if P > 1 and bw_link_a2a > 0:
         # All-to-All communication to route tokens
-        # Data size moved per chip approx (Total Tokens / num_chips) * K * H * bytes_per_param
+        # Data size moved per chip approx (Total Tokens / moe_ep_degree) * K * H * bytes_per_param
         K = config.num_activated_experts
-        data_size = (total_tokens / strategy.num_chips) * K * H * bytes_per_param
+        data_size = (total_tokens / strategy.moe_ep_degree) * K * H * bytes_per_param
         # All-to-All latency approx data_size / bw_link
+        comm_latency += data_size / 1e9 / bw_link_a2a
+        
+        # All-to-All communication to unroute tokens (send back)
+        # Assuming same data size for return trip
         comm_latency += data_size / 1e9 / bw_link_a2a
         
     return comm_latency
@@ -582,11 +586,12 @@ if __name__ == '__main__':
 
     if args.table:
         print("\n=== Prefill Phase Table ===")
-        headers = ["Strategy", "Throughput/Chip", "TTFT (ms)", "Bound By", "Total Latency (ms)", "KV Cache (GB)"]
+        headers = ["Strategy", "Batch Size", "Throughput/Chip", "TTFT (ms)", "Bound By", "Total Latency (ms)", "KV Cache (GB)"]
         rows = []
         for strategy_str, res in prefill_results:
             rows.append([
                 strategy_str,
+                prefill_batch,
                 f"{res['throughput_per_chip']:.2f}",
                 f"{res['ttft_ms']:.2f}",
                 res['bound_by'],
@@ -596,11 +601,12 @@ if __name__ == '__main__':
         print_markdown_table(headers, rows)
         
         print("\n=== Decode Phase Table ===")
-        headers = ["Strategy", "Throughput/Chip", "TPOT (ms)", "Bound By", "Total Latency (ms)", "KV Cache (GB)"]
+        headers = ["Strategy", "Batch Size", "Throughput/Chip", "TPOT (ms)", "Bound By", "Total Latency (ms)", "KV Cache (GB)"]
         rows = []
         for strategy_str, res in decode_results:
             rows.append([
                 strategy_str,
+                decode_batch,
                 f"{res['throughput_per_chip']:.2f}",
                 f"{res['tpot_ms']:.2f}",
                 res['bound_by'],
@@ -610,13 +616,14 @@ if __name__ == '__main__':
         print_markdown_table(headers, rows)
         
         print("\n=== Latency Comparison Table ===")
-        headers = ["Strategy", "Phase", "Compute Latency (ms)", "Memory Latency (ms)", "ICI Latency (ms)", "Gap (ms)", "Bound By"]
+        headers = ["Strategy", "Phase", "Batch Size", "Compute Latency (ms)", "Memory Latency (ms)", "ICI Latency (ms)", "Gap (ms)", "Bound By"]
         rows = []
         for strategy_str, res in prefill_results:
             gap = abs(res['compute_latency_ms'] - res['memory_latency_ms'])
             rows.append([
                 strategy_str,
                 "Prefill",
+                prefill_batch,
                 f"{res['compute_latency_ms']:.2f}",
                 f"{res['memory_latency_ms']:.2f}",
                 f"{res['comm_latency_ms']:.2f}",
@@ -628,6 +635,7 @@ if __name__ == '__main__':
             rows.append([
                 strategy_str,
                 "Decode",
+                decode_batch,
                 f"{res['compute_latency_ms']:.2f}",
                 f"{res['memory_latency_ms']:.2f}",
                 f"{res['comm_latency_ms']:.2f}",

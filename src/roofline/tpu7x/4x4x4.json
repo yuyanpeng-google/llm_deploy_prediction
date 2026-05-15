@@ -1,0 +1,7 @@
+{
+  "peak_bf16_flops": 2307.0,
+  "peak_fp8_flops": 4614.0,
+  "hbm_bandwidth": 7380.0,
+  "ici_ar_ag_bandwidth": 600.0,
+  "ici_a2a_bandwidth": 100.0
+}
