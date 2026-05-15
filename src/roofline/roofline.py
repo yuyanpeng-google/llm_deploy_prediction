@@ -5,7 +5,7 @@ focusing on per-layer calculation for prefill and decode phases.
 '''
 
 from dataclasses import dataclass
-from typing import Dict, Any
+from typing import Dict, Any, List
 import json
 import argparse
 
@@ -62,10 +62,10 @@ class HardwareSpec:
     hbm_bandwidth: float
     '''Peak HBM bandwidth in GB/s.'''
     
-    ici_ar_ag_bandwidth: float = 0.0
+    ici_ar_ag_bandwidth: float
     '''Unidirectional ICI bandwidth for All-Reduce and All-Gather in GB/s.'''
     
-    ici_a2a_bandwidth: float = 0.0
+    ici_a2a_bandwidth: float
     '''Unidirectional ICI bandwidth for All-to-All in GB/s.'''
 
 @dataclass
@@ -450,6 +450,35 @@ def calculate_roofline(config: ModelConfig, hardware: HardwareSpec, seq_len: int
         'throughput_per_chip': throughput_per_chip
     }
 
+def print_markdown_table(headers: List[str], rows: List[List[Any]]) -> None:
+    '''Prints a list of rows as a markdown table.
+    
+    Args:
+        headers: List of column headers.
+        rows: List of rows, where each row is a list of values.
+    '''
+    if not headers or not rows:
+        return
+        
+    # Calculate max width for each column
+    widths = [len(h) for h in headers]
+    for row in rows:
+        for i, val in enumerate(row):
+            widths[i] = max(widths[i], len(str(val)))
+            
+    # Print header
+    header_str = " | ".join(f"{h:<{widths[i]}}" for i, h in enumerate(headers))
+    print(f"| {header_str} |")
+    
+    # Print separator
+    sep_str = " | ".join("-" * widths[i] for i in range(len(headers)))
+    print(f"| {sep_str} |")
+    
+    # Print rows
+    for row in rows:
+        row_str = " | ".join(f"{str(val):<{widths[i]}}" for i, val in enumerate(row))
+        print(f"| {row_str} |")
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Calculate roofline for LLM deployment.')
     parser.add_argument('--model_config', type=str, help='Path to model config JSON file.')
@@ -457,6 +486,7 @@ if __name__ == '__main__':
     parser.add_argument('--seq_len', type=int, default=1024, help='Sequence length.')
     parser.add_argument('--prefill_batch_size', type=int, default=1, help='Batch size for prefill phase.')
     parser.add_argument('--decode_batch_size', type=int, default=1, help='Batch size for decode phase.')
+    parser.add_argument('--table', action='store_true', help='Output results in markdown table format.')
     
     args = parser.parse_args()
     
@@ -489,7 +519,9 @@ if __name__ == '__main__':
         hw_spec = HardwareSpec(
             peak_bf16_flops=2307.0,
             peak_fp8_flops=4614.0,
-            hbm_bandwidth=7380.0
+            hbm_bandwidth=7380.0,
+            ici_ar_ag_bandwidth=600.0,
+            ici_a2a_bandwidth=200.0
         )
         
     strategies = [
@@ -505,21 +537,88 @@ if __name__ == '__main__':
         ShardingStrategy(num_chips=4, attn_tp_degree=2, attn_dp_degree=2, moe_tp_degree=2, moe_ep_degree=2),
     ]
     
+    prefill_results = []
+    decode_results = []
+    
     for strategy in strategies:
-        print(f"\n=== Strategy: Chips={strategy.num_chips}, Attn(TP={strategy.attn_tp_degree},DP={strategy.attn_dp_degree}), MoE(TP={strategy.moe_tp_degree},EP={strategy.moe_ep_degree}) ===")
+        strategy_str = f"Chips={strategy.num_chips}, Attn(TP={strategy.attn_tp_degree},DP={strategy.attn_dp_degree}), MoE(TP={strategy.moe_tp_degree},EP={strategy.moe_ep_degree})"
         
-        print(f"--- Prefill Phase (Seq Len {args.seq_len}, Batch {prefill_batch}) ---")
         try:
             prefill_res = calculate_roofline(model_cfg, hw_spec, seq_len=args.seq_len, batch_size=prefill_batch, is_prefill=True, strategy=strategy)
-            for k, v in prefill_res.items():
-                print(f'{k}: {v}')
+            prefill_results.append((strategy_str, prefill_res))
         except ValueError as e:
-            print(f"Error: {e}")
+            print(f"Error calculating prefill for {strategy_str}: {e}")
             
-        print(f"--- Decode Phase (Seq Len {args.seq_len}, Batch {decode_batch}, 1 step) ---")
         try:
             decode_res = calculate_roofline(model_cfg, hw_spec, seq_len=args.seq_len, batch_size=decode_batch, is_prefill=False, strategy=strategy)
-            for k, v in decode_res.items():
-                print(f'{k}: {v}')
+            decode_results.append((strategy_str, decode_res))
         except ValueError as e:
-            print(f"Error: {e}")
+            print(f"Error calculating decode for {strategy_str}: {e}")
+
+    if args.table:
+        print("\n=== Prefill Phase Table ===")
+        headers = ["Strategy", "Throughput/Chip", "TTFT (ms)", "Bound By", "Total Latency (ms)", "KV Cache (GB)"]
+        rows = []
+        for strategy_str, res in prefill_results:
+            rows.append([
+                strategy_str,
+                f"{res['throughput_per_chip']:.2f}",
+                f"{res['ttft_ms']:.2f}",
+                res['bound_by'],
+                f"{res['total_latency_ms']:.2f}",
+                f"{res['kv_cache_size_gb']:.2f}"
+            ])
+        print_markdown_table(headers, rows)
+        
+        print("\n=== Decode Phase Table ===")
+        headers = ["Strategy", "Throughput/Chip", "TPOT (ms)", "Bound By", "Total Latency (ms)", "KV Cache (GB)"]
+        rows = []
+        for strategy_str, res in decode_results:
+            rows.append([
+                strategy_str,
+                f"{res['throughput_per_chip']:.2f}",
+                f"{res['tpot_ms']:.2f}",
+                res['bound_by'],
+                f"{res['total_latency_ms']:.2f}",
+                f"{res['kv_cache_size_gb']:.2f}"
+            ])
+        print_markdown_table(headers, rows)
+        
+        print("\n=== Latency Comparison Table ===")
+        headers = ["Strategy", "Phase", "Compute Latency (ms)", "Memory Latency (ms)", "ICI Latency (ms)", "Gap (ms)", "Bound By"]
+        rows = []
+        for strategy_str, res in prefill_results:
+            gap = abs(res['compute_latency_ms'] - res['memory_latency_ms'])
+            rows.append([
+                strategy_str,
+                "Prefill",
+                f"{res['compute_latency_ms']:.2f}",
+                f"{res['memory_latency_ms']:.2f}",
+                f"{res['comm_latency_ms']:.2f}",
+                f"{gap:.2f}",
+                res['bound_by']
+            ])
+        for strategy_str, res in decode_results:
+            gap = abs(res['compute_latency_ms'] - res['memory_latency_ms'])
+            rows.append([
+                strategy_str,
+                "Decode",
+                f"{res['compute_latency_ms']:.2f}",
+                f"{res['memory_latency_ms']:.2f}",
+                f"{res['comm_latency_ms']:.2f}",
+                f"{gap:.2f}",
+                res['bound_by']
+            ])
+        print_markdown_table(headers, rows)
+    else:
+        for strategy_str, res in prefill_results:
+            print(f"\n=== Strategy: {strategy_str} ===")
+            print(f"--- Prefill Phase (Seq Len {args.seq_len}, Batch {prefill_batch}) ---")
+            for k, v in res.items():
+                print(f'{k}: {v}')
+                
+        for strategy_str, res in decode_results:
+            print(f"\n=== Strategy: {strategy_str} ===")
+            print(f"--- Decode Phase (Seq Len {args.seq_len}, Batch {decode_batch}, 1 step) ---")
+            for k, v in res.items():
+                print(f'{k}: {v}')
