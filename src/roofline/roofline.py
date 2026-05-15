@@ -479,6 +479,41 @@ def print_markdown_table(headers: List[str], rows: List[List[Any]]) -> None:
         row_str = " | ".join(f"{str(val):<{widths[i]}}" for i, val in enumerate(row))
         print(f"| {row_str} |")
 
+def generate_strategies(num_chips: int) -> List[ShardingStrategy]:
+    '''Generates all valid ShardingStrategy combinations for a given num_chips.
+    
+    A strategy is valid if:
+    - attn_tp_degree * attn_dp_degree == num_chips
+    - moe_tp_degree * moe_ep_degree == num_chips
+    
+    Args:
+        num_chips: Total number of chips.
+        
+    Returns:
+        A list of valid ShardingStrategy instances.
+    '''
+    if num_chips <= 0:
+        raise ValueError("num_chips must be a positive integer.")
+        
+    factors = [i for i in range(1, num_chips + 1) if num_chips % i == 0]
+    
+    attn_pairs = [(tp, num_chips // tp) for tp in factors]
+    moe_pairs = [(tp, num_chips // tp) for tp in factors]
+    
+    strategies = []
+    for attn_tp, attn_dp in attn_pairs:
+        for moe_tp, moe_ep in moe_pairs:
+            strategies.append(
+                ShardingStrategy(
+                    num_chips=num_chips,
+                    attn_tp_degree=attn_tp,
+                    attn_dp_degree=attn_dp,
+                    moe_tp_degree=moe_tp,
+                    moe_ep_degree=moe_ep
+                )
+            )
+    return strategies
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Calculate roofline for LLM deployment.')
     parser.add_argument('--model_config', type=str, help='Path to model config JSON file.')
@@ -487,6 +522,7 @@ if __name__ == '__main__':
     parser.add_argument('--prefill_batch_size', type=int, default=1, help='Batch size for prefill phase.')
     parser.add_argument('--decode_batch_size', type=int, default=1, help='Batch size for decode phase.')
     parser.add_argument('--table', action='store_true', help='Output results in markdown table format.')
+    parser.add_argument('--num_chips', type=int, default=4, help='Number of chips for grid search.')
     
     args = parser.parse_args()
     
@@ -524,18 +560,7 @@ if __name__ == '__main__':
             ici_a2a_bandwidth=200.0
         )
         
-    strategies = [
-        # Pure TP
-        ShardingStrategy(num_chips=4, attn_tp_degree=4, moe_tp_degree=4),
-        # Pure DP/EP
-        ShardingStrategy(num_chips=4, attn_dp_degree=4, moe_ep_degree=4),
-        # Hybrid MoE
-        ShardingStrategy(num_chips=4, attn_tp_degree=4, moe_tp_degree=2, moe_ep_degree=2),
-        # Hybrid Attention
-        ShardingStrategy(num_chips=4, attn_tp_degree=2, attn_dp_degree=2, moe_ep_degree=4),
-        # Hybrid Both
-        ShardingStrategy(num_chips=4, attn_tp_degree=2, attn_dp_degree=2, moe_tp_degree=2, moe_ep_degree=2),
-    ]
+    strategies = generate_strategies(args.num_chips)
     
     prefill_results = []
     decode_results = []
