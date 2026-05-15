@@ -318,9 +318,13 @@ if __name__ == '__main__':
     parser.add_argument('--model_config', type=str, help='Path to model config JSON file.')
     parser.add_argument('--hardware_spec', type=str, help='Path to hardware spec JSON file.')
     parser.add_argument('--seq_len', type=int, default=1024, help='Sequence length.')
-    parser.add_argument('--batch_size', type=int, default=1, help='Batch size.')
+    parser.add_argument('--prefill_batch_size', type=int, default=1, help='Batch size for prefill phase.')
+    parser.add_argument('--decode_batch_size', type=int, default=1, help='Batch size for decode phase.')
     
     args = parser.parse_args()
+    
+    prefill_batch = args.prefill_batch_size
+    decode_batch = args.decode_batch_size
     
     if args.model_config:
         model_cfg = load_model_config(args.model_config)
@@ -351,12 +355,12 @@ if __name__ == '__main__':
             hbm_bandwidth=7380.0
         )
         
-    print(f"--- Prefill Phase (Seq Len {args.seq_len}, Batch {args.batch_size}) ---")
-    prefill_res = calculate_roofline(model_cfg, hw_spec, seq_len=args.seq_len, batch_size=args.batch_size, is_prefill=True)
+    print(f"--- Prefill Phase (Seq Len {args.seq_len}, Batch {prefill_batch}) ---")
+    prefill_res = calculate_roofline(model_cfg, hw_spec, seq_len=args.seq_len, batch_size=prefill_batch, is_prefill=True)
     for k, v in prefill_res.items():
         print(f'{k}: {v}')
         
-    print(f"\n--- Decode Phase (Seq Len {args.seq_len}, Batch {args.batch_size}, 1 step) ---")
-    decode_res = calculate_roofline(model_cfg, hw_spec, seq_len=args.seq_len, batch_size=args.batch_size, is_prefill=False)
+    print(f"\n--- Decode Phase (Seq Len {args.seq_len}, Batch {decode_batch}, 1 step) ---")
+    decode_res = calculate_roofline(model_cfg, hw_spec, seq_len=args.seq_len, batch_size=decode_batch, is_prefill=False)
     for k, v in decode_res.items():
         print(f'{k}: {v}')
