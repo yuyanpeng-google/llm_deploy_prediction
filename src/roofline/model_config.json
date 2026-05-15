@@ -9,5 +9,6 @@
   "num_activated_experts": 8,
   "intermediate_size": 2560,
   "bytes_per_param": 1,
-  "attn_precision": "w8a16"
+  "attn_op_precision": "bf16",
+  "kv_cache_precision": "fp8"
 }

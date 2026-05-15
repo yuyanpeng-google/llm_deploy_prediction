@@ -61,6 +61,31 @@ class HardwareSpec:
     
     hbm_bandwidth: float
     '''Peak HBM bandwidth in GB/s.'''
+    
+    ici_ar_ag_bandwidth: float = 0.0
+    '''Unidirectional ICI bandwidth for All-Reduce and All-Gather in GB/s.'''
+    
+    ici_a2a_bandwidth: float = 0.0
+    '''Unidirectional ICI bandwidth for All-to-All in GB/s.'''
+
+@dataclass
+class ShardingStrategy:
+    '''Configuration for sharding strategy.'''
+    
+    num_chips: int
+    '''Total number of chips used.'''
+    
+    attn_tp_degree: int = 1
+    '''TP degree for attention.'''
+    
+    attn_dp_degree: int = 1
+    '''DP degree for attention.'''
+    
+    moe_tp_degree: int = 1
+    '''TP degree for MoE.'''
+    
+    moe_ep_degree: int = 1
+    '''EP degree for MoE.'''
 
 def load_model_config(file_path: str) -> ModelConfig:
     '''Loads ModelConfig from a JSON file.
@@ -88,19 +113,19 @@ def load_hardware_spec(file_path: str) -> HardwareSpec:
         data = json.load(f)
     return HardwareSpec(**data)
 
-def calculate_attention_flops(config: ModelConfig, seq_len: int, batch_size: int, is_prefill: bool) -> Dict[str, float]:
+def calculate_attention_flops(config: ModelConfig, seq_len: int, global_batch_size: int, is_prefill: bool) -> Dict[str, float]:
     '''Calculates the FLOPs for the attention mechanism in a single layer.
 
     Args:
         config: Model configuration.
         seq_len: Current sequence length.
-        batch_size: Batch size.
+        global_batch_size: Global batch size.
         is_prefill: True if prefill phase, False if decode phase.
 
     Returns:
         Dictionary with 'fp8_flops' and 'bf16_flops'.
     '''
-    B = batch_size
+    B = global_batch_size
     S = seq_len
     H = config.hidden_size
     N_kv = config.num_kv_heads
@@ -159,19 +184,19 @@ def calculate_attention_flops(config: ModelConfig, seq_len: int, batch_size: int
             
     return {'fp8_flops': fp8_flops, 'bf16_flops': bf16_flops}
 
-def calculate_moe_flops(config: ModelConfig, seq_len: int, batch_size: int, is_prefill: bool) -> Dict[str, float]:
+def calculate_moe_flops(config: ModelConfig, seq_len: int, global_batch_size: int, is_prefill: bool) -> Dict[str, float]:
     '''Calculates the FLOPs for the MoE layer in a single layer.
 
     Args:
         config: Model configuration.
         seq_len: Current sequence length.
-        batch_size: Batch size.
+        global_batch_size: Global batch size.
         is_prefill: True if prefill phase, False if decode phase.
 
     Returns:
         Dictionary with 'fp8_flops' and 'bf16_flops'.
     '''
-    B = batch_size
+    B = global_batch_size
     S = seq_len if is_prefill else 1  # In decode, we only process 1 token per step
     H = config.hidden_size
     E = config.num_experts
@@ -188,13 +213,17 @@ def calculate_moe_flops(config: ModelConfig, seq_len: int, batch_size: int, is_p
     flops = float(gate_flops + expert_flops)
     
     if config.bytes_per_param == 1:
-        return {'fp8_flops': flops, 'bf16_flops': 0.0}
+        fp8_flops = flops
+        bf16_flops = 0.0
     elif config.bytes_per_param == 2:
-        return {'fp8_flops': 0.0, 'bf16_flops': flops}
+        fp8_flops = 0.0
+        bf16_flops = flops
     else:
         raise ValueError(f"Unsupported bytes_per_param: {config.bytes_per_param}")
+        
+    return {'fp8_flops': fp8_flops, 'bf16_flops': bf16_flops}
 
-def calculate_memory_access(config: ModelConfig, seq_len: int, batch_size: int, is_prefill: bool) -> float:
+def calculate_memory_access(config: ModelConfig, seq_len: int, global_batch_size: int, is_prefill: bool, strategy: ShardingStrategy = None) -> float:
     '''Calculates the memory access in bytes for a single layer.
 
     Focuses on weights and KV cache.
@@ -202,13 +231,14 @@ def calculate_memory_access(config: ModelConfig, seq_len: int, batch_size: int, 
     Args:
         config: Model configuration.
         seq_len: Current sequence length.
-        batch_size: Batch size.
+        global_batch_size: Global batch size.
         is_prefill: True if prefill phase, False if decode phase.
+        strategy: Sharding strategy.
 
     Returns:
-        Total bytes accessed in one layer.
+        Total bytes accessed in one layer across the whole system.
     '''
-    B = batch_size
+    B = global_batch_size
     S = seq_len
     H = config.hidden_size
     N_kv = config.num_kv_heads
@@ -223,6 +253,10 @@ def calculate_memory_access(config: ModelConfig, seq_len: int, batch_size: int, 
     # Weights size in bytes
     attn_weights = (2 * H * q_hidden + 2 * H * kv_hidden) * bytes_per_param
     moe_weights = (H * E + 3 * E * H * I) * bytes_per_param
+    
+    if strategy:
+        attn_weights *= strategy.attn_dp_degree
+            
     total_weights = attn_weights + moe_weights
     
     if config.kv_cache_precision == 'fp8':
@@ -231,7 +265,7 @@ def calculate_memory_access(config: ModelConfig, seq_len: int, batch_size: int, 
         bytes_per_kv_param = 2
     else:
         raise ValueError(f"Unsupported kv_cache_precision: {config.kv_cache_precision}")
-    
+        
     if is_prefill:
         # Read weights (once per layer)
         # Write KV cache for S tokens
@@ -247,6 +281,65 @@ def calculate_memory_access(config: ModelConfig, seq_len: int, batch_size: int, 
         kv_write = 2 * B * 1 * kv_hidden * bytes_per_kv_param
         
         return float(total_weights + kv_read + kv_write)
+
+def calculate_communication_latency(config: ModelConfig, strategy: ShardingStrategy, hardware: HardwareSpec, seq_len: int, global_batch_size: int, is_prefill: bool) -> float:
+    '''Calculates the communication latency in seconds for a single layer.
+
+    Args:
+        config: Model configuration.
+        strategy: Sharding strategy.
+        hardware: Hardware specifications.
+        seq_len: Current sequence length.
+        global_batch_size: Global batch size.
+        is_prefill: True if prefill phase, False if decode phase.
+
+    Returns:
+        Communication latency in seconds.
+    '''
+    if strategy is None:
+        return 0.0
+        
+    B = global_batch_size
+    S = seq_len if is_prefill else 1
+    H = config.hidden_size
+    bytes_per_param = config.bytes_per_param
+    
+    comm_latency = 0.0
+    
+    bw_link_ar = hardware.ici_ar_ag_bandwidth
+    bw_link_a2a = hardware.ici_a2a_bandwidth
+    
+    # Attention Communication
+    P = strategy.attn_tp_degree
+    if P > 1 and bw_link_ar > 0:
+        # All-Reduce after output projection
+        # Data size = (B / attn_dp_degree) * S * H * bytes_per_param
+        data_size = (B / strategy.attn_dp_degree) * S * H * bytes_per_param
+        comm_latency += 2 * ((P - 1) / P) * data_size / 1e9 / bw_link_ar
+        
+    # MoE Communication
+    # Total tokens in system = B * S
+    total_tokens = B * S
+    
+    # MoE All-Reduce
+    P = strategy.moe_tp_degree
+    if P > 1 and bw_link_ar > 0:
+        # All-Reduce after down projection
+        # Data size handled by this group = (Total Tokens / moe_ep_degree) * H * bytes_per_param
+        data_size = (total_tokens / strategy.moe_ep_degree) * H * bytes_per_param
+        comm_latency += 2 * ((P - 1) / P) * data_size / 1e9 / bw_link_ar
+        
+    # MoE All-to-All
+    P = strategy.moe_ep_degree
+    if P > 1 and bw_link_a2a > 0:
+        # All-to-All communication to route tokens
+        # Data size moved per chip approx (Total Tokens / num_chips) * K * H * bytes_per_param
+        K = config.num_activated_experts
+        data_size = (total_tokens / strategy.num_chips) * K * H * bytes_per_param
+        # All-to-All latency approx data_size / bw_link
+        comm_latency += data_size / 1e9 / bw_link_a2a
+        
+    return comm_latency
 
 def calculate_kv_cache_size(config: ModelConfig, seq_len: int, batch_size: int) -> float:
     '''Calculates the total memory capacity needed for the KV cache.
@@ -271,27 +364,50 @@ def calculate_kv_cache_size(config: ModelConfig, seq_len: int, batch_size: int) 
     return float(2 * batch_size * seq_len * kv_hidden * bytes_per_kv_param * config.num_layers)
 
 
-def calculate_roofline(config: ModelConfig, hardware: HardwareSpec, seq_len: int, batch_size: int, is_prefill: bool) -> Dict[str, Any]:
+def calculate_roofline(config: ModelConfig, hardware: HardwareSpec, seq_len: int, batch_size: int, is_prefill: bool, strategy: ShardingStrategy = None) -> Dict[str, Any]:
     '''Calculates the roofline performance and latency.
 
     Args:
         config: Model configuration.
         hardware: Hardware specifications.
         seq_len: Current sequence length.
-        batch_size: Batch size.
+        batch_size: Global batch size.
         is_prefill: True if prefill phase, False if decode phase.
+        strategy: Sharding strategy.
 
     Returns:
         Dictionary containing calculated metrics.
     '''
-    attn_flops = calculate_attention_flops(config, seq_len, batch_size, is_prefill)
-    moe_flops = calculate_moe_flops(config, seq_len, batch_size, is_prefill)
+    # Validation
+    if strategy:
+        if strategy.attn_tp_degree * strategy.attn_dp_degree != strategy.num_chips:
+            raise ValueError(f"Attn degrees product ({strategy.attn_tp_degree} * {strategy.attn_dp_degree}) != num_chips ({strategy.num_chips})")
+        if strategy.moe_tp_degree * strategy.moe_ep_degree != strategy.num_chips:
+            raise ValueError(f"MoE degrees product ({strategy.moe_tp_degree} * {strategy.moe_ep_degree}) != num_chips ({strategy.num_chips})")
+        num_chips = strategy.num_chips
+    else:
+        num_chips = 1
+        
+    # B is now global batch size
+    B = batch_size
     
-    fp8_flops = (attn_flops['fp8_flops'] + moe_flops['fp8_flops']) * config.num_layers
-    bf16_flops = (attn_flops['bf16_flops'] + moe_flops['bf16_flops']) * config.num_layers
+    attn_flops = calculate_attention_flops(config, seq_len, B, is_prefill)
+    moe_flops = calculate_moe_flops(config, seq_len, B, is_prefill)
+    
+    # Calculate total FLOPs first
+    total_fp8_flops = (attn_flops['fp8_flops'] + moe_flops['fp8_flops']) * config.num_layers
+    total_bf16_flops = (attn_flops['bf16_flops'] + moe_flops['bf16_flops']) * config.num_layers
+    
+    # Per-chip FLOPs
+    fp8_flops = total_fp8_flops / num_chips
+    bf16_flops = total_bf16_flops / num_chips
     
     total_flops = fp8_flops + bf16_flops
-    mem_access = calculate_memory_access(config, seq_len, batch_size, is_prefill) * config.num_layers
+    
+    # Total memory access
+    total_mem_access = calculate_memory_access(config, seq_len, B, is_prefill, strategy) * config.num_layers
+    # Per-chip memory access
+    mem_access = total_mem_access / num_chips
     
     # Convert to GB
     gb_access = mem_access / 1e9
@@ -299,18 +415,39 @@ def calculate_roofline(config: ModelConfig, hardware: HardwareSpec, seq_len: int
     compute_latency = (fp8_flops / 1e12 / hardware.peak_fp8_flops) + (bf16_flops / 1e12 / hardware.peak_bf16_flops)
     memory_latency = gb_access / hardware.hbm_bandwidth  # seconds
     
+    comm_latency = 0.0
+    if strategy:
+        comm_latency = calculate_communication_latency(config, strategy, hardware, seq_len, B, is_prefill) * config.num_layers
+        
     roofline_latency = max(compute_latency, memory_latency)
+    total_latency = roofline_latency + comm_latency
     
-    kv_cache_size = calculate_kv_cache_size(config, seq_len, batch_size)
+    # Total KV cache in system
+    kv_cache_size = calculate_kv_cache_size(config, seq_len, B)
     
+    # Calculate TTFT and TPOT
+    ttft = total_latency if is_prefill else 0.0
+    tpot = total_latency if not is_prefill else 0.0
+    
+    # Calculate throughput per chip
+    if is_prefill:
+        throughput_per_chip = (B * seq_len) / (total_latency * num_chips) if total_latency > 0 else 0.0
+    else:
+        throughput_per_chip = B / (total_latency * num_chips) if total_latency > 0 else 0.0
+        
     return {
-        'flops': total_flops,
-        'mem_access_bytes': mem_access,
+        'flops_per_chip': total_flops,
+        'mem_access_bytes_per_chip': mem_access,
         'compute_latency_ms': compute_latency * 1000,
         'memory_latency_ms': memory_latency * 1000,
+        'comm_latency_ms': comm_latency * 1000,
         'roofline_latency_ms': roofline_latency * 1000,
+        'total_latency_ms': total_latency * 1000,
         'bound_by': 'compute' if compute_latency > memory_latency else 'memory',
-        'kv_cache_size_gb': kv_cache_size / 1e9
+        'kv_cache_size_gb': kv_cache_size / 1e9,
+        'ttft_ms': ttft * 1000 if is_prefill else 0.0,
+        'tpot_ms': tpot * 1000 if not is_prefill else 0.0,
+        'throughput_per_chip': throughput_per_chip
     }
 
 if __name__ == '__main__':
@@ -355,12 +492,34 @@ if __name__ == '__main__':
             hbm_bandwidth=7380.0
         )
         
-    print(f"--- Prefill Phase (Seq Len {args.seq_len}, Batch {prefill_batch}) ---")
-    prefill_res = calculate_roofline(model_cfg, hw_spec, seq_len=args.seq_len, batch_size=prefill_batch, is_prefill=True)
-    for k, v in prefill_res.items():
-        print(f'{k}: {v}')
+    strategies = [
+        # Pure TP
+        ShardingStrategy(num_chips=4, attn_tp_degree=4, moe_tp_degree=4),
+        # Pure DP/EP
+        ShardingStrategy(num_chips=4, attn_dp_degree=4, moe_ep_degree=4),
+        # Hybrid MoE
+        ShardingStrategy(num_chips=4, attn_tp_degree=4, moe_tp_degree=2, moe_ep_degree=2),
+        # Hybrid Attention
+        ShardingStrategy(num_chips=4, attn_tp_degree=2, attn_dp_degree=2, moe_ep_degree=4),
+        # Hybrid Both
+        ShardingStrategy(num_chips=4, attn_tp_degree=2, attn_dp_degree=2, moe_tp_degree=2, moe_ep_degree=2),
+    ]
+    
+    for strategy in strategies:
+        print(f"\n=== Strategy: Chips={strategy.num_chips}, Attn(TP={strategy.attn_tp_degree},DP={strategy.attn_dp_degree}), MoE(TP={strategy.moe_tp_degree},EP={strategy.moe_ep_degree}) ===")
         
-    print(f"\n--- Decode Phase (Seq Len {args.seq_len}, Batch {decode_batch}, 1 step) ---")
-    decode_res = calculate_roofline(model_cfg, hw_spec, seq_len=args.seq_len, batch_size=decode_batch, is_prefill=False)
-    for k, v in decode_res.items():
-        print(f'{k}: {v}')
+        print(f"--- Prefill Phase (Seq Len {args.seq_len}, Batch {prefill_batch}) ---")
+        try:
+            prefill_res = calculate_roofline(model_cfg, hw_spec, seq_len=args.seq_len, batch_size=prefill_batch, is_prefill=True, strategy=strategy)
+            for k, v in prefill_res.items():
+                print(f'{k}: {v}')
+        except ValueError as e:
+            print(f"Error: {e}")
+            
+        print(f"--- Decode Phase (Seq Len {args.seq_len}, Batch {decode_batch}, 1 step) ---")
+        try:
+            decode_res = calculate_roofline(model_cfg, hw_spec, seq_len=args.seq_len, batch_size=decode_batch, is_prefill=False, strategy=strategy)
+            for k, v in decode_res.items():
+                print(f'{k}: {v}')
+        except ValueError as e:
+            print(f"Error: {e}")
