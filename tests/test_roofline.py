@@ -96,6 +96,119 @@ class TestRooflineCalculations(unittest.TestCase):
         self.assertAlmostEqual(flops['bf16_flops'], expected_bf16)
         self.assertEqual(flops['fp8_flops'], 0.0)
 
+    def test_calculate_attention_flops_fp8_all(self) -> None:
+        '''Test attention FLOPs calculation for all FP8 precision.'''
+        config = get_default_config(
+            hidden_size=1024,
+            num_q_heads=8,
+            num_kv_heads=8,
+            attn_head_dim=128,
+            bytes_per_param=1,
+            attn_op_precision='fp8'
+        )
+        seq_len = 128
+        batch_size = 1
+        flops: Dict[str, float] = calculate_attention_flops(config, seq_len, batch_size, is_prefill=True)
+        
+        B = batch_size
+        S = seq_len
+        H = config.hidden_size
+        N_q = config.num_q_heads
+        N_kv = config.num_kv_heads
+        D = config.attn_head_dim
+        
+        q_hidden = N_q * D
+        kv_hidden = N_kv * D
+        
+        q_flops = 2 * B * S * H * q_hidden
+        k_flops = 2 * B * S * H * kv_hidden
+        v_flops = 2 * B * S * H * kv_hidden
+        score_flops = 2 * B * N_q * S * S * D
+        value_flops = 2 * B * N_q * S * S * D
+        out_flops = 2 * B * S * q_hidden * H
+        
+        expected_fp8 = float(q_flops + k_flops + v_flops + score_flops + value_flops + out_flops)
+        self.assertAlmostEqual(flops['fp8_flops'], expected_fp8)
+        self.assertEqual(flops['bf16_flops'], 0.0)
+
+    def test_calculate_attention_flops_fp8_mixed(self) -> None:
+        '''Test attention FLOPs calculation for mixed FP8/BF16 precision.'''
+        config = get_default_config(
+            hidden_size=1024,
+            num_q_heads=8,
+            num_kv_heads=8,
+            attn_head_dim=128,
+            bytes_per_param=2,
+            attn_op_precision='fp8'
+        )
+        seq_len = 128
+        batch_size = 1
+        flops: Dict[str, float] = calculate_attention_flops(config, seq_len, batch_size, is_prefill=True)
+        
+        B = batch_size
+        S = seq_len
+        H = config.hidden_size
+        N_q = config.num_q_heads
+        N_kv = config.num_kv_heads
+        D = config.attn_head_dim
+        
+        q_hidden = N_q * D
+        kv_hidden = N_kv * D
+        
+        q_flops = 2 * B * S * H * q_hidden
+        k_flops = 2 * B * S * H * kv_hidden
+        v_flops = 2 * B * S * H * kv_hidden
+        score_flops = 2 * B * N_q * S * S * D
+        value_flops = 2 * B * N_q * S * S * D
+        out_flops = 2 * B * S * q_hidden * H
+        
+        # With bytes_per_param=2 and attn_op_precision='fp8':
+        # proj_flops are BF16, attn_op_flops (score + value) are FP8
+        expected_bf16 = float(q_flops + k_flops + v_flops + out_flops)
+        expected_fp8 = float(score_flops + value_flops)
+        
+        self.assertAlmostEqual(flops['fp8_flops'], expected_fp8)
+        self.assertAlmostEqual(flops['bf16_flops'], expected_bf16)
+
+    def test_calculate_attention_flops_w8a16(self) -> None:
+        '''Test attention FLOPs calculation for W8A16 simulated by bytes_per_param=1 and attn_op_precision='bf16'.'''
+        config = get_default_config(
+            hidden_size=1024,
+            num_q_heads=8,
+            num_kv_heads=8,
+            attn_head_dim=128,
+            bytes_per_param=1,
+            attn_op_precision='bf16'
+        )
+        seq_len = 128
+        batch_size = 1
+        flops: Dict[str, float] = calculate_attention_flops(config, seq_len, batch_size, is_prefill=True)
+        
+        B = batch_size
+        S = seq_len
+        H = config.hidden_size
+        N_q = config.num_q_heads
+        N_kv = config.num_kv_heads
+        D = config.attn_head_dim
+        
+        q_hidden = N_q * D
+        kv_hidden = N_kv * D
+        
+        q_flops = 2 * B * S * H * q_hidden
+        k_flops = 2 * B * S * H * kv_hidden
+        v_flops = 2 * B * S * H * kv_hidden
+        score_flops = 2 * B * N_q * S * S * D
+        value_flops = 2 * B * N_q * S * S * D
+        out_flops = 2 * B * S * q_hidden * H
+        
+        # With bytes_per_param=1 and attn_op_precision='bf16':
+        # proj_flops are FP8, attn_op_flops are BF16
+        expected_fp8 = float(q_flops + k_flops + v_flops + out_flops)
+        expected_bf16 = float(score_flops + value_flops)
+        
+        self.assertAlmostEqual(flops['fp8_flops'], expected_fp8)
+        self.assertAlmostEqual(flops['bf16_flops'], expected_bf16)
+
     def test_calculate_attention_flops_gqa_prefill(self) -> None:
         '''Test attention FLOPs calculation for GQA in prefill phase.'''
         config = get_default_config(
@@ -303,6 +416,33 @@ class TestRooflineCalculations(unittest.TestCase):
         expected_bf16 = float(gate_flops + expert_flops)
         self.assertAlmostEqual(flops['bf16_flops'], expected_bf16)
         self.assertEqual(flops['fp8_flops'], 0.0)
+
+    def test_calculate_moe_flops_fp8(self) -> None:
+        '''Test MoE FLOPs calculation for FP8 precision.'''
+        config = get_default_config(
+            hidden_size=1024,
+            num_experts=4,
+            num_activated_experts=2,
+            intermediate_size=2048,
+            bytes_per_param=1
+        )
+        seq_len = 128
+        batch_size = 1
+        flops: Dict[str, float] = calculate_moe_flops(config, seq_len, batch_size, is_prefill=True)
+        
+        B = batch_size
+        S = seq_len
+        H = config.hidden_size
+        E = config.num_experts
+        K = config.num_activated_experts
+        I = config.intermediate_size
+        
+        gate_flops = 2 * B * S * H * E
+        expert_flops = B * S * K * 6 * H * I
+        
+        expected_fp8 = float(gate_flops + expert_flops)
+        self.assertAlmostEqual(flops['fp8_flops'], expected_fp8)
+        self.assertEqual(flops['bf16_flops'], 0.0)
 
     def test_calculate_communication_latency_tp_attn(self) -> None:
         '''Test communication latency for TP in attention.'''
