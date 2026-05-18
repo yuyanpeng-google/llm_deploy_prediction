@@ -276,15 +276,45 @@ def calculate_communication_latency(
     # MoE Communication - Phase 1: Before MoE (Routing/Gathering)
     moe_comm_type = strategy.moe_comm_type
     
-    if strategy.attn_dp_degree > 1:
-        if moe_comm_type == 'all_gather' and bw_link_ar > 0:
-            # All-Gather inputs
-            G = strategy.attn_dp_degree
-            data_size = B * S * H * bytes_per_param
-            comm_latency += ((G - 1) / G) * data_size / 1e9 / bw_link_ar
-        elif moe_comm_type == 'a2a' and bw_link_a2a > 0:
-            # Forward A2A (routing)
+    if moe_comm_type == 'all_gather' and strategy.attn_dp_degree > 1 and bw_link_ar > 0:
+        # All-Gather inputs
+        G = strategy.attn_dp_degree
+        data_size = B * S * H * bytes_per_param
+        comm_latency += ((G - 1) / G) * data_size / 1e9 / bw_link_ar
+    elif moe_comm_type == 'a2a' and strategy.moe_ep_degree > 1 and bw_link_a2a > 0:
+        # Forward A2A (routing)
+        ep_eff = strategy.moe_ep_degree
+        K = config.num_activated_experts
+        prob_visit_remote = 1 - (1 - 1 / ep_eff) ** K
+        data_size = (
+            (total_tokens / ep_eff)
+            * (ep_eff - 1)
+            * prob_visit_remote
+            * H
+            * bytes_per_param
+        )
+        comm_latency += data_size / 1e9 / bw_link_a2a
+
+    # MoE Communication - Phase 2: After MoE (Unrouting/Reduction)
+    if moe_comm_type == 'all_gather' and bw_link_ar > 0 and (strategy.moe_ep_degree > 1 or strategy.moe_tp_degree > 1):
+        # Option A: Full size All-Reduce for both TP and EP
+        G = strategy.moe_ep_degree if strategy.moe_ep_degree > 1 else strategy.attn_dp_degree
+        data_size = B * S * H * bytes_per_param
+        comm_latency += 2 * ((G - 1) / G) * data_size / 1e9 / bw_link_ar
+            
+    elif moe_comm_type == 'a2a':
+        # Option B: AR for TP and then A2A for EP
+        
+        # AR for TP
+        if strategy.moe_tp_degree > 1 and bw_link_ar > 0:
+            # All-Reduce after down projection
             ep_eff = strategy.moe_ep_degree if strategy.moe_ep_degree > 1 else strategy.attn_dp_degree
+            data_size = (total_tokens / ep_eff) * H * bytes_per_param
+            comm_latency += 2 * ((strategy.moe_tp_degree - 1) / strategy.moe_tp_degree) * data_size / 1e9 / bw_link_ar
+            
+        # A2A for EP (Unrouting)
+        if strategy.moe_ep_degree > 1 and bw_link_a2a > 0:
+            ep_eff = strategy.moe_ep_degree
             K = config.num_activated_experts
             prob_visit_remote = 1 - (1 - 1 / ep_eff) ** K
             data_size = (
@@ -295,39 +325,6 @@ def calculate_communication_latency(
                 * bytes_per_param
             )
             comm_latency += data_size / 1e9 / bw_link_a2a
-
-    # MoE Communication - Phase 2: After MoE (Unrouting/Reduction)
-    if moe_comm_type == 'all_gather' and bw_link_ar > 0:
-        # Option A: Full size All-Reduce for both TP and EP
-        if strategy.attn_dp_degree > 1 or strategy.moe_ep_degree > 1:
-            G = strategy.moe_ep_degree if strategy.moe_ep_degree > 1 else strategy.attn_dp_degree
-            data_size = B * S * H * bytes_per_param
-            comm_latency += 2 * ((G - 1) / G) * data_size / 1e9 / bw_link_ar
-            
-    elif moe_comm_type == 'a2a':
-        # Option B: AR for TP and then A2A for EP
-        
-        # AR for TP
-        P = strategy.moe_tp_degree
-        if P > 1 and bw_link_ar > 0:
-            # All-Reduce after down projection
-            data_size = (total_tokens / strategy.moe_ep_degree) * H * bytes_per_param
-            comm_latency += 2 * ((P - 1) / P) * data_size / 1e9 / bw_link_ar
-            
-        # A2A for EP (Unrouting)
-        if strategy.attn_dp_degree > 1 or strategy.moe_ep_degree > 1:
-            if bw_link_a2a > 0:
-                ep_eff = strategy.moe_ep_degree if strategy.moe_ep_degree > 1 else strategy.attn_dp_degree
-                K = config.num_activated_experts
-                prob_visit_remote = 1 - (1 - 1 / ep_eff) ** K
-                data_size = (
-                    (total_tokens / ep_eff)
-                    * (ep_eff - 1)
-                    * prob_visit_remote
-                    * H
-                    * bytes_per_param
-                )
-                comm_latency += data_size / 1e9 / bw_link_a2a
 
     return comm_latency
 
