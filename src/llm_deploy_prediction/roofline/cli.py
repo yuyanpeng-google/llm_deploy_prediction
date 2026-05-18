@@ -342,12 +342,22 @@ def _print_latency_table(
         "Compute Latency (ms)",
         "Memory Latency (ms)",
         "ICI Latency (ms)",
-        "Gap (ms)",
+        "Compute Util (%)",
+        "HBM BW Util (%)",
         "Bound By",
     ]
     rows = []
     for strategy_str, batch, res in prefill_results:
-        gap = abs(res.compute_latency_ms - res.memory_latency_ms)
+        compute_util: float = (
+            (res.compute_latency_ms / res.total_latency_ms) * 100
+            if res.total_latency_ms > 0
+            else 0.0
+        )
+        hbm_util: float = (
+            (res.memory_latency_ms / res.total_latency_ms) * 100
+            if res.total_latency_ms > 0
+            else 0.0
+        )
         rows.append(
             [
                 strategy_str,
@@ -356,12 +366,22 @@ def _print_latency_table(
                 f"{res.compute_latency_ms:.2f}",
                 f"{res.memory_latency_ms:.2f}",
                 f"{res.comm_latency_ms:.2f}",
-                f"{gap:.2f}",
+                f"{compute_util:.2f}",
+                f"{hbm_util:.2f}",
                 res.bound_by,
             ]
         )
     for strategy_str, batch, res in decode_results:
-        gap = abs(res.compute_latency_ms - res.memory_latency_ms)
+        compute_util: float = (
+            (res.compute_latency_ms / res.total_latency_ms) * 100
+            if res.total_latency_ms > 0
+            else 0.0
+        )
+        hbm_util: float = (
+            (res.memory_latency_ms / res.total_latency_ms) * 100
+            if res.total_latency_ms > 0
+            else 0.0
+        )
         rows.append(
             [
                 strategy_str,
@@ -370,7 +390,8 @@ def _print_latency_table(
                 f"{res.compute_latency_ms:.2f}",
                 f"{res.memory_latency_ms:.2f}",
                 f"{res.comm_latency_ms:.2f}",
-                f"{gap:.2f}",
+                f"{compute_util:.2f}",
+                f"{hbm_util:.2f}",
                 res.bound_by,
             ]
         )
