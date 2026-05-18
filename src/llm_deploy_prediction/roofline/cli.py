@@ -5,6 +5,7 @@ roofline analysis tool.
 '''
 
 import argparse
+from dataclasses import asdict
 import glob
 import os
 import sys
@@ -256,11 +257,11 @@ def main(argv: Optional[List[str]] = None) -> None:
                 [
                     strategy_str,
                     batch,
-                    f"{res['throughput_per_chip']:.2f}",
-                    f"{res['ttft_ms']:.2f}",
-                    res['bound_by'],
-                    f"{res['total_latency_ms']:.2f}",
-                    f"{res['kv_cache_size_gb']:.2f}",
+                    f"{res.throughput_per_chip:.2f}",
+                    f"{res.ttft_ms:.2f}",
+                    res.bound_by,
+                    f"{res.total_latency_ms:.2f}",
+                    f"{res.kv_cache_size_gb:.2f}",
                 ]
             )
         print_markdown_table(headers, rows)
@@ -281,11 +282,11 @@ def main(argv: Optional[List[str]] = None) -> None:
                 [
                     strategy_str,
                     batch,
-                    f"{res['throughput_per_chip']:.2f}",
-                    f"{res['tpot_ms']:.2f}",
-                    res['bound_by'],
-                    f"{res['total_latency_ms']:.2f}",
-                    f"{res['kv_cache_size_gb']:.2f}",
+                    f"{res.throughput_per_chip:.2f}",
+                    f"{res.tpot_ms:.2f}",
+                    res.bound_by,
+                    f"{res.total_latency_ms:.2f}",
+                    f"{res.kv_cache_size_gb:.2f}",
                 ]
             )
         print_markdown_table(headers, rows)
@@ -304,34 +305,34 @@ def main(argv: Optional[List[str]] = None) -> None:
         rows = []
         for strategy_str, batch, res in prefill_results:
             gap = abs(
-                res['compute_latency_ms'] - res['memory_latency_ms']
+                res.compute_latency_ms - res.memory_latency_ms
             )
             rows.append(
                 [
                     strategy_str,
                     "Prefill",
                     batch,
-                    f"{res['compute_latency_ms']:.2f}",
-                    f"{res['memory_latency_ms']:.2f}",
-                    f"{res['comm_latency_ms']:.2f}",
+                    f"{res.compute_latency_ms:.2f}",
+                    f"{res.memory_latency_ms:.2f}",
+                    f"{res.comm_latency_ms:.2f}",
                     f"{gap:.2f}",
-                    res['bound_by'],
+                    res.bound_by,
                 ]
             )
         for strategy_str, batch, res in decode_results:
             gap = abs(
-                res['compute_latency_ms'] - res['memory_latency_ms']
+                res.compute_latency_ms - res.memory_latency_ms
             )
             rows.append(
                 [
                     strategy_str,
                     "Decode",
                     batch,
-                    f"{res['compute_latency_ms']:.2f}",
-                    f"{res['memory_latency_ms']:.2f}",
-                    f"{res['comm_latency_ms']:.2f}",
+                    f"{res.compute_latency_ms:.2f}",
+                    f"{res.memory_latency_ms:.2f}",
+                    f"{res.comm_latency_ms:.2f}",
                     f"{gap:.2f}",
-                    res['bound_by'],
+                    res.bound_by,
                 ]
             )
         print_markdown_table(headers, rows)
@@ -350,8 +351,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         rows = []
         for strategy_str, batch, res in prefill_results:
             util = (
-                (res['hbm_usage_gb'] / res['hbm_capacity_gb']) * 100
-                if res['hbm_capacity_gb'] > 0
+                (res.hbm_usage_gb / res.hbm_capacity_gb) * 100
+                if res.hbm_capacity_gb > 0
                 else 0.0
             )
             rows.append(
@@ -359,17 +360,17 @@ def main(argv: Optional[List[str]] = None) -> None:
                     strategy_str,
                     "Prefill",
                     batch,
-                    f"{res['weights_per_chip_gb']:.2f}",
-                    f"{res['kv_cache_per_chip_gb']:.2f}",
-                    f"{res['hbm_usage_gb']:.2f}",
-                    f"{res['hbm_capacity_gb']:.2f}",
+                    f"{res.weights_per_chip_gb:.2f}",
+                    f"{res.kv_cache_per_chip_gb:.2f}",
+                    f"{res.hbm_usage_gb:.2f}",
+                    f"{res.hbm_capacity_gb:.2f}",
                     f"{util:.2f}",
                 ]
             )
         for strategy_str, batch, res in decode_results:
             util = (
-                (res['hbm_usage_gb'] / res['hbm_capacity_gb']) * 100
-                if res['hbm_capacity_gb'] > 0
+                (res.hbm_usage_gb / res.hbm_capacity_gb) * 100
+                if res.hbm_capacity_gb > 0
                 else 0.0
             )
             rows.append(
@@ -377,10 +378,10 @@ def main(argv: Optional[List[str]] = None) -> None:
                     strategy_str,
                     "Decode",
                     batch,
-                    f"{res['weights_per_chip_gb']:.2f}",
-                    f"{res['kv_cache_per_chip_gb']:.2f}",
-                    f"{res['hbm_usage_gb']:.2f}",
-                    f"{res['hbm_capacity_gb']:.2f}",
+                    f"{res.weights_per_chip_gb:.2f}",
+                    f"{res.kv_cache_per_chip_gb:.2f}",
+                    f"{res.hbm_usage_gb:.2f}",
+                    f"{res.hbm_capacity_gb:.2f}",
                     f"{util:.2f}",
                 ]
             )
@@ -398,23 +399,23 @@ def main(argv: Optional[List[str]] = None) -> None:
 
         prefill_sorted = sorted(
             prefill_results,
-            key=lambda x: x[2]['throughput_per_chip'],
+            key=lambda x: x[2].throughput_per_chip,
             reverse=True,
         )
         rows = []
         for strategy_str, batch, res in prefill_sorted:
             util = (
-                (res['hbm_usage_gb'] / res['hbm_capacity_gb']) * 100
-                if res['hbm_capacity_gb'] > 0
+                (res.hbm_usage_gb / res.hbm_capacity_gb) * 100
+                if res.hbm_capacity_gb > 0
                 else 0.0
             )
             rows.append(
                 [
                     strategy_str,
                     batch,
-                    f"{res['throughput_per_chip']:.2f}",
-                    f"{res['total_latency_ms']:.2f}",
-                    res['bound_by'],
+                    f"{res.throughput_per_chip:.2f}",
+                    f"{res.total_latency_ms:.2f}",
+                    res.bound_by,
                     f"{util:.2f}",
                 ]
             )
@@ -432,23 +433,23 @@ def main(argv: Optional[List[str]] = None) -> None:
 
         decode_sorted = sorted(
             decode_results,
-            key=lambda x: x[2]['throughput_per_chip'],
+            key=lambda x: x[2].throughput_per_chip,
             reverse=True,
         )
         rows = []
         for strategy_str, batch, res in decode_sorted:
             util = (
-                (res['hbm_usage_gb'] / res['hbm_capacity_gb']) * 100
-                if res['hbm_capacity_gb'] > 0
+                (res.hbm_usage_gb / res.hbm_capacity_gb) * 100
+                if res.hbm_capacity_gb > 0
                 else 0.0
             )
             rows.append(
                 [
                     strategy_str,
                     batch,
-                    f"{res['throughput_per_chip']:.2f}",
-                    f"{res['total_latency_ms']:.2f}",
-                    res['bound_by'],
+                    f"{res.throughput_per_chip:.2f}",
+                    f"{res.total_latency_ms:.2f}",
+                    res.bound_by,
                     f"{util:.2f}",
                 ]
             )
@@ -459,7 +460,7 @@ def main(argv: Optional[List[str]] = None) -> None:
             print(
                 f"--- Prefill Phase (Seq Len {args.seq_len}, Batch {prefill_batch}) ---"
             )
-            for k, v in res.items():
+            for k, v in asdict(res).items():
                 print(f"{k}: {v}")
 
         for strategy_str, decode_batch, res in decode_results:
@@ -467,7 +468,7 @@ def main(argv: Optional[List[str]] = None) -> None:
             print(
                 f"--- Decode Phase (Seq Len {args.seq_len}, Batch {decode_batch}, 1 step) ---"
             )
-            for k, v in res.items():
+            for k, v in asdict(res).items():
                 print(f"{k}: {v}")
 
 

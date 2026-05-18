@@ -4,6 +4,7 @@ This module contains pure functions for calculating FLOPs, memory access,
 communication latency, and overall roofline performance for LLM deployment.
 '''
 
+from dataclasses import dataclass
 from typing import Any, Dict, Optional
 from llm_deploy_prediction.roofline.config import HardwareSpec, ModelConfig, ShardingStrategy
 
@@ -386,6 +387,47 @@ def calculate_weights_storage(
     return float(total_weights_per_chip)
 
 
+@dataclass
+class RooflineResult:
+    '''Result of roofline analysis.
+
+    Attributes:
+        flops_per_chip: Total FLOPs per chip.
+        weights_per_chip_gb: Weights storage per chip in GB.
+        kv_cache_per_chip_gb: KV cache storage per chip in GB.
+        hbm_usage_gb: Total HBM usage per chip in GB.
+        hbm_capacity_gb: HBM capacity per chip in GB.
+        mem_access_bytes_per_chip: Total memory access in bytes per chip.
+        compute_latency_ms: Compute latency in milliseconds.
+        memory_latency_ms: Memory latency in milliseconds.
+        comm_latency_ms: Communication latency in milliseconds.
+        roofline_latency_ms: Roofline latency (max of compute and memory) in milliseconds.
+        total_latency_ms: Total latency (roofline + communication) in milliseconds.
+        bound_by: Which resource bounds the performance ('compute' or 'memory').
+        kv_cache_size_gb: Total KV cache size in GB across all chips.
+        ttft_ms: Time to first token in milliseconds (if prefill).
+        tpot_ms: Time per output token in milliseconds (if decode).
+        throughput_per_chip: Throughput per chip (tokens/s).
+    '''
+
+    flops_per_chip: float
+    weights_per_chip_gb: float
+    kv_cache_per_chip_gb: float
+    hbm_usage_gb: float
+    hbm_capacity_gb: float
+    mem_access_bytes_per_chip: float
+    compute_latency_ms: float
+    memory_latency_ms: float
+    comm_latency_ms: float
+    roofline_latency_ms: float
+    total_latency_ms: float
+    bound_by: str
+    kv_cache_size_gb: float
+    ttft_ms: float
+    tpot_ms: float
+    throughput_per_chip: float
+
+
 def calculate_roofline(
     config: ModelConfig,
     hardware: HardwareSpec,
@@ -393,7 +435,7 @@ def calculate_roofline(
     batch_size: int,
     is_prefill: bool,
     strategy: Optional[ShardingStrategy] = None,
-) -> Dict[str, Any]:
+) -> RooflineResult:
     '''Calculates the roofline performance and latency.
 
     Args:
@@ -503,21 +545,21 @@ def calculate_roofline(
     hbm_usage_bytes = weights_storage + kv_cache_per_chip
     hbm_usage_gb = hbm_usage_bytes / 1e9
 
-    return {
-        'flops_per_chip': total_flops,
-        'weights_per_chip_gb': weights_storage / 1e9,
-        'kv_cache_per_chip_gb': kv_cache_per_chip / 1e9,
-        'hbm_usage_gb': hbm_usage_gb,
-        'hbm_capacity_gb': hardware.hbm_capacity,
-        'mem_access_bytes_per_chip': mem_access,
-        'compute_latency_ms': compute_latency * 1000,
-        'memory_latency_ms': memory_latency * 1000,
-        'comm_latency_ms': comm_latency * 1000,
-        'roofline_latency_ms': roofline_latency * 1000,
-        'total_latency_ms': total_latency * 1000,
-        'bound_by': 'compute' if compute_latency > memory_latency else 'memory',
-        'kv_cache_size_gb': kv_cache_size / 1e9,
-        'ttft_ms': ttft * 1000 if is_prefill else 0.0,
-        'tpot_ms': tpot * 1000 if not is_prefill else 0.0,
-        'throughput_per_chip': throughput_per_chip,
-    }
+    return RooflineResult(
+        flops_per_chip=total_flops,
+        weights_per_chip_gb=weights_storage / 1e9,
+        kv_cache_per_chip_gb=kv_cache_per_chip / 1e9,
+        hbm_usage_gb=hbm_usage_gb,
+        hbm_capacity_gb=hardware.hbm_capacity,
+        mem_access_bytes_per_chip=mem_access,
+        compute_latency_ms=compute_latency * 1000,
+        memory_latency_ms=memory_latency * 1000,
+        comm_latency_ms=comm_latency * 1000,
+        roofline_latency_ms=roofline_latency * 1000,
+        total_latency_ms=total_latency * 1000,
+        bound_by='compute' if compute_latency > memory_latency else 'memory',
+        kv_cache_size_gb=kv_cache_size / 1e9,
+        ttft_ms=ttft * 1000 if is_prefill else 0.0,
+        tpot_ms=tpot * 1000 if not is_prefill else 0.0,
+        throughput_per_chip=throughput_per_chip,
+    )

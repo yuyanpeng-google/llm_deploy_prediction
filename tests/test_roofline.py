@@ -13,6 +13,7 @@ from llm_deploy_prediction.roofline.calculations import (
     calculate_memory_access,
     calculate_communication_latency,
     calculate_roofline,
+    RooflineResult,
 )
 from llm_deploy_prediction.roofline.cli import parse_args, main
 
@@ -594,7 +595,7 @@ class TestRooflineCalculations(unittest.TestCase):
         )
         seq_len = 128
         batch_size = 1
-        results: Dict[str, Any] = calculate_roofline(config, hardware, seq_len, batch_size, is_prefill=True)
+        results: RooflineResult = calculate_roofline(config, hardware, seq_len, batch_size, is_prefill=True)
         
 
         # We reuse calculations from previous tests or reproduce them here.
@@ -609,12 +610,12 @@ class TestRooflineCalculations(unittest.TestCase):
         roofline_latency = max(compute_latency, memory_latency)
         total_latency = roofline_latency + 0.0  # No communication in this simple test
         
-        self.assertAlmostEqual(results['flops_per_chip'], 4363124736.0)
-        self.assertAlmostEqual(results['mem_access_bytes_per_chip'], 62398464.0)
-        self.assertAlmostEqual(results['compute_latency_ms'], 4.363124736e-5 * 1000, places=4)
-        self.assertAlmostEqual(results['memory_latency_ms'], 0.00124796928 * 1000, places=4)
-        self.assertAlmostEqual(results['total_latency_ms'], 0.00124796928 * 1000, places=4)
-        self.assertEqual(results['bound_by'], 'memory')
+        self.assertAlmostEqual(results.flops_per_chip, 4363124736.0)
+        self.assertAlmostEqual(results.mem_access_bytes_per_chip, 62398464.0)
+        self.assertAlmostEqual(results.compute_latency_ms, 4.363124736e-5 * 1000, places=4)
+        self.assertAlmostEqual(results.memory_latency_ms, 0.00124796928 * 1000, places=4)
+        self.assertAlmostEqual(results.total_latency_ms, 0.00124796928 * 1000, places=4)
+        self.assertEqual(results.bound_by, 'memory')
 
     def test_parse_args_defaults(self) -> None:
         '''Test parse_args with default values.'''
