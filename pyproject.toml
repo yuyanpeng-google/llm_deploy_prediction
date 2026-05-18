@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm_deploy_prediction"
+version = "0.1.0"
+description = "Roofline model for calculating theoretical performance of LLM deployment."
+readme = "README.md"
+requires-python = ">=3.7"
+classifiers = [
+    "Programming Language :: Python :: 3",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.scripts]
+roofline = "llm_deploy_prediction.roofline.roofline:main"

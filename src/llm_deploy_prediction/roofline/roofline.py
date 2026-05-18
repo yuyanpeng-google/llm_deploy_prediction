@@ -5,7 +5,7 @@ focusing on per-layer calculation for prefill and decode phases.
 '''
 
 from dataclasses import dataclass
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import json
 import argparse
 import os
@@ -231,7 +231,7 @@ def calculate_moe_flops(config: ModelConfig, seq_len: int, global_batch_size: in
         
     return {'fp8_flops': fp8_flops, 'bf16_flops': bf16_flops}
 
-def calculate_memory_access(config: ModelConfig, seq_len: int, global_batch_size: int, is_prefill: bool, strategy: ShardingStrategy = None) -> float:
+def calculate_memory_access(config: ModelConfig, seq_len: int, global_batch_size: int, is_prefill: bool, strategy: Optional[ShardingStrategy] = None) -> float:
     '''Calculates the memory access in bytes for a single layer.
 
     Focuses on weights and KV cache.
@@ -429,7 +429,7 @@ def calculate_weights_storage(config: ModelConfig, strategy: ShardingStrategy) -
     return float(total_weights_per_chip)
 
 
-def calculate_roofline(config: ModelConfig, hardware: HardwareSpec, seq_len: int, batch_size: int, is_prefill: bool, strategy: ShardingStrategy = None) -> Dict[str, Any]:
+def calculate_roofline(config: ModelConfig, hardware: HardwareSpec, seq_len: int, batch_size: int, is_prefill: bool, strategy: Optional[ShardingStrategy] = None) -> Dict[str, Any]:
     '''Calculates the roofline performance and latency.
 
     Args:
@@ -590,7 +590,15 @@ def generate_strategies(num_chips: int) -> List[ShardingStrategy]:
             )
     return strategies
 
-if __name__ == '__main__':
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    '''Parses command line arguments.
+    
+    Args:
+        argv: List of arguments to parse. If None, uses sys.argv.
+        
+    Returns:
+        Parsed arguments.
+    '''
     parser = argparse.ArgumentParser(description='Calculate roofline for LLM deployment.')
     parser.add_argument('--model_config', type=str, help='Path to model config JSON file.')
     parser.add_argument('--hardware_spec', type=str, nargs='+', help='Path to hardware spec JSON file(s).')
@@ -605,7 +613,15 @@ if __name__ == '__main__':
     parser.add_argument('--table', action='store_true', help='Output results in markdown table format.')
     parser.add_argument('--num_chips', type=int, default=4, help='Number of chips for grid search (fallback if not in spec).')
     
-    args = parser.parse_args()
+    return parser.parse_args(argv)
+
+def main(argv: Optional[List[str]] = None) -> None:
+    '''Main entry point for calculating roofline.
+    
+    Args:
+        argv: List of arguments to parse. If None, uses sys.argv.
+    '''
+    args = parse_args(argv)
     
     if args.model_config:
         model_cfg = load_model_config(args.model_config)
@@ -806,14 +822,18 @@ if __name__ == '__main__':
             ])
         print_markdown_table(headers, rows)
     else:
-        for strategy_str, res in prefill_results:
+        for strategy_str, prefill_batch, res in prefill_results:
             print(f"\n=== Strategy: {strategy_str} ===")
             print(f"--- Prefill Phase (Seq Len {args.seq_len}, Batch {prefill_batch}) ---")
             for k, v in res.items():
                 print(f'{k}: {v}')
                 
-        for strategy_str, res in decode_results:
+        for strategy_str, decode_batch, res in decode_results:
             print(f"\n=== Strategy: {strategy_str} ===")
             print(f"--- Decode Phase (Seq Len {args.seq_len}, Batch {decode_batch}, 1 step) ---")
             for k, v in res.items():
                 print(f'{k}: {v}')
+
+if __name__ == '__main__':
+    import sys
+    main(sys.argv[1:])
