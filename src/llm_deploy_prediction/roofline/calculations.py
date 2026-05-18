@@ -273,39 +273,61 @@ def calculate_communication_latency(
     # Total tokens in system = B * S
     total_tokens = B * S
 
-    # MoE All-Reduce
-    P = strategy.moe_tp_degree
-    if P > 1 and bw_link_ar > 0:
-        # All-Reduce after down projection
-        # Data size handled by this group = (Total Tokens / moe_ep_degree) * H * bytes_per_param
-        data_size = (
-            (total_tokens / strategy.moe_ep_degree) * H * bytes_per_param
-        )
-        comm_latency += 2 * ((P - 1) / P) * data_size / 1e9 / bw_link_ar
+    # MoE Communication - Phase 1: Before MoE (Routing/Gathering)
+    moe_comm_type = strategy.moe_comm_type
+    
+    if strategy.attn_dp_degree > 1:
+        if moe_comm_type == 'all_gather' and bw_link_ar > 0:
+            # All-Gather inputs
+            G = strategy.attn_dp_degree
+            data_size = B * S * H * bytes_per_param
+            comm_latency += ((G - 1) / G) * data_size / 1e9 / bw_link_ar
+        elif moe_comm_type == 'a2a' and bw_link_a2a > 0:
+            # Forward A2A (routing)
+            ep_eff = strategy.moe_ep_degree if strategy.moe_ep_degree > 1 else strategy.attn_dp_degree
+            K = config.num_activated_experts
+            prob_visit_remote = 1 - (1 - 1 / ep_eff) ** K
+            data_size = (
+                (total_tokens / ep_eff)
+                * (ep_eff - 1)
+                * prob_visit_remote
+                * H
+                * bytes_per_param
+            )
+            comm_latency += data_size / 1e9 / bw_link_a2a
 
-    # MoE All-to-All
-    P = strategy.moe_ep_degree
-    if P > 1 and bw_link_a2a > 0:
-        # All-to-All communication to route tokens
-        # Optimized: Tokens are sent at most once per destination group.
-        # Expected number of remote groups a token visits: (EP - 1) * (1 - (1 - 1/EP)^K)
-        K = config.num_activated_experts
-        ep = strategy.moe_ep_degree
-        prob_visit_remote = 1 - (1 - 1 / ep) ** K
-        data_size = (
-            (total_tokens / ep)
-            * (ep - 1)
-            * prob_visit_remote
-            * H
-            * bytes_per_param
-        )
-
-        # All-to-All latency approx data_size / bw_link
-        comm_latency += data_size / 1e9 / bw_link_a2a
-
-        # All-to-All communication to unroute tokens (send back)
-        # Assuming same data size for return trip
-        comm_latency += data_size / 1e9 / bw_link_a2a
+    # MoE Communication - Phase 2: After MoE (Unrouting/Reduction)
+    if moe_comm_type == 'all_gather' and bw_link_ar > 0:
+        # Option A: Full size All-Reduce for both TP and EP
+        if strategy.attn_dp_degree > 1 or strategy.moe_ep_degree > 1:
+            G = strategy.moe_ep_degree if strategy.moe_ep_degree > 1 else strategy.attn_dp_degree
+            data_size = B * S * H * bytes_per_param
+            comm_latency += 2 * ((G - 1) / G) * data_size / 1e9 / bw_link_ar
+            
+    elif moe_comm_type == 'a2a':
+        # Option B: AR for TP and then A2A for EP
+        
+        # AR for TP
+        P = strategy.moe_tp_degree
+        if P > 1 and bw_link_ar > 0:
+            # All-Reduce after down projection
+            data_size = (total_tokens / strategy.moe_ep_degree) * H * bytes_per_param
+            comm_latency += 2 * ((P - 1) / P) * data_size / 1e9 / bw_link_ar
+            
+        # A2A for EP (Unrouting)
+        if strategy.attn_dp_degree > 1 or strategy.moe_ep_degree > 1:
+            if bw_link_a2a > 0:
+                ep_eff = strategy.moe_ep_degree if strategy.moe_ep_degree > 1 else strategy.attn_dp_degree
+                K = config.num_activated_experts
+                prob_visit_remote = 1 - (1 - 1 / ep_eff) ** K
+                data_size = (
+                    (total_tokens / ep_eff)
+                    * (ep_eff - 1)
+                    * prob_visit_remote
+                    * H
+                    * bytes_per_param
+                )
+                comm_latency += data_size / 1e9 / bw_link_a2a
 
     return comm_latency
 

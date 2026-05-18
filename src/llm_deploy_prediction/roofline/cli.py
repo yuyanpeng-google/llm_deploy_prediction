@@ -46,15 +46,17 @@ def generate_strategies(num_chips: int) -> List[ShardingStrategy]:
     strategies = []
     for attn_tp, attn_dp in attn_pairs:
         for moe_tp, moe_ep in moe_pairs:
-            strategies.append(
-                ShardingStrategy(
-                    num_chips=num_chips,
-                    attn_tp_degree=attn_tp,
-                    attn_dp_degree=attn_dp,
-                    moe_tp_degree=moe_tp,
-                    moe_ep_degree=moe_ep,
+            for comm_type in ['a2a', 'all_gather']:
+                strategies.append(
+                    ShardingStrategy(
+                        num_chips=num_chips,
+                        attn_tp_degree=attn_tp,
+                        attn_dp_degree=attn_dp,
+                        moe_tp_degree=moe_tp,
+                        moe_ep_degree=moe_ep,
+                        moe_comm_type=comm_type,
+                    )
                 )
-            )
     return strategies
 
 
@@ -220,7 +222,7 @@ def _calculate_results(
         )
 
         for strategy in strategies:
-            strategy_str = f"Spec={spec_name}, Chips={strategy.num_chips}, Attn(TP={strategy.attn_tp_degree},DP={strategy.attn_dp_degree}), MoE(TP={strategy.moe_tp_degree},EP={strategy.moe_ep_degree})"
+            strategy_str = f"Spec={spec_name}, Chips={strategy.num_chips}, Attn(TP={strategy.attn_tp_degree},DP={strategy.attn_dp_degree}), MoE(TP={strategy.moe_tp_degree},EP={strategy.moe_ep_degree},Comm={strategy.moe_comm_type})"
 
             if args.prefill_local_batch_size is not None:
                 prefill_batch = (

@@ -510,7 +510,7 @@ class TestRooflineCalculations(unittest.TestCase):
             ici_a2a_bandwidth=5.0,
             num_chips=4
         )
-        strategy = ShardingStrategy(num_chips=4, attn_tp_degree=1, attn_dp_degree=1, moe_tp_degree=1, moe_ep_degree=4)
+        strategy = ShardingStrategy(num_chips=4, attn_tp_degree=1, attn_dp_degree=4, moe_tp_degree=1, moe_ep_degree=4)
         seq_len = 128
         batch_size = 1
         latency: float = calculate_communication_latency(config, strategy, hardware, seq_len, batch_size, is_prefill=True)
@@ -524,6 +524,119 @@ class TestRooflineCalculations(unittest.TestCase):
         data_size = (total_tokens / ep) * (ep - 1) * prob_visit_remote * config.hidden_size * config.bytes_per_param
         expected_latency = 2 * (data_size / 1e9 / bw)
         
+        self.assertAlmostEqual(latency, expected_latency)
+
+    def test_calculate_communication_latency_moe_tp_with_attn_dp_a2a(self) -> None:
+        '''Test communication latency for moe_tp with attn_dp using a2a.'''
+        config = get_default_config(
+            hidden_size=1024,
+            num_activated_experts=2,
+            bytes_per_param=2
+        )
+        hardware = HardwareSpec(
+            peak_bf16_flops=100.0,
+            peak_fp8_flops=200.0,
+            hbm_bandwidth=50.0,
+            ici_ar_ag_bandwidth=10.0,
+            ici_a2a_bandwidth=5.0,
+            num_chips=4
+        )
+        # attn_dp=4, moe_tp=4 (so moe_ep=1)
+        strategy = ShardingStrategy(num_chips=4, attn_tp_degree=1, attn_dp_degree=4, moe_tp_degree=4, moe_ep_degree=1, moe_comm_type='a2a')
+        seq_len = 128
+        batch_size = 1
+        latency: float = calculate_communication_latency(config, strategy, hardware, seq_len, batch_size, is_prefill=True)
+        
+        # 1. MoE All-Reduce (from moe_tp=4)
+        P_tp = strategy.moe_tp_degree
+        bw_ar = hardware.ici_ar_ag_bandwidth
+        total_tokens = batch_size * seq_len
+        data_size_ar = (total_tokens / strategy.moe_ep_degree) * config.hidden_size * config.bytes_per_param
+        latency_ar = 2 * ((P_tp - 1) / P_tp) * data_size_ar / 1e9 / bw_ar
+        
+        # 2. MoE A2A Routing (due to attn_dp=4 and moe_tp=4)
+        ep_eff = strategy.attn_dp_degree # fallback to attn_dp
+        K = config.num_activated_experts
+        bw_a2a = hardware.ici_a2a_bandwidth
+        prob_visit_remote = 1 - (1 - 1 / ep_eff) ** K
+        data_size_a2a = (total_tokens / ep_eff) * (ep_eff - 1) * prob_visit_remote * config.hidden_size * config.bytes_per_param
+        latency_a2a = 2 * data_size_a2a / 1e9 / bw_a2a
+        
+        expected_latency = latency_ar + latency_a2a
+        self.assertAlmostEqual(latency, expected_latency)
+
+    def test_calculate_communication_latency_moe_tp_with_attn_dp_all_gather(self) -> None:
+        '''Test communication latency for moe_tp with attn_dp using all_gather.'''
+        config = get_default_config(
+            hidden_size=1024,
+            bytes_per_param=2
+        )
+        hardware = HardwareSpec(
+            peak_bf16_flops=100.0,
+            peak_fp8_flops=200.0,
+            hbm_bandwidth=50.0,
+            ici_ar_ag_bandwidth=10.0,
+            ici_a2a_bandwidth=5.0,
+            num_chips=4
+        )
+        # attn_dp=4, moe_tp=4
+        strategy = ShardingStrategy(num_chips=4, attn_tp_degree=1, attn_dp_degree=4, moe_tp_degree=4, moe_ep_degree=1, moe_comm_type='all_gather')
+        seq_len = 128
+        batch_size = 1
+        latency: float = calculate_communication_latency(config, strategy, hardware, seq_len, batch_size, is_prefill=True)
+        
+        # 1. MoE All-Reduce (from moe_tp=4)
+        P_tp = strategy.moe_tp_degree
+        bw_ar = hardware.ici_ar_ag_bandwidth
+        total_tokens = batch_size * seq_len
+        data_size_ar = (total_tokens / strategy.moe_ep_degree) * config.hidden_size * config.bytes_per_param
+        latency_ar = 2 * ((P_tp - 1) / P_tp) * data_size_ar / 1e9 / bw_ar
+        
+        # 2. MoE All-Gather inputs (needed because attn_dp=4 > 1)
+        G = strategy.attn_dp_degree
+        data_size_ag = batch_size * seq_len * config.hidden_size * config.bytes_per_param
+        latency_ag = ((G - 1) / G) * data_size_ag / 1e9 / bw_ar
+        
+        expected_latency = latency_ar + latency_ag
+        self.assertAlmostEqual(latency, expected_latency)
+
+    def test_calculate_communication_latency_moe_ep_with_attn_tp_full_sharding(self) -> None:
+        '''Test communication latency for moe_ep with attn_tp (full sharding, attn_dp=1).'''
+        config = get_default_config(
+            hidden_size=1024,
+            num_activated_experts=2,
+            bytes_per_param=2
+        )
+        hardware = HardwareSpec(
+            peak_bf16_flops=100.0,
+            peak_fp8_flops=200.0,
+            hbm_bandwidth=50.0,
+            ici_ar_ag_bandwidth=10.0,
+            ici_a2a_bandwidth=5.0,
+            num_chips=4
+        )
+        # attn_tp=4, attn_dp=1, moe_tp=1, moe_ep=4
+        strategy = ShardingStrategy(num_chips=4, attn_tp_degree=4, attn_dp_degree=1, moe_tp_degree=1, moe_ep_degree=4, moe_comm_type='a2a')
+        seq_len = 128
+        batch_size = 1
+        latency: float = calculate_communication_latency(config, strategy, hardware, seq_len, batch_size, is_prefill=True)
+        
+        # 1. Attention All-Reduce (from attn_tp=4)
+        P_attn = strategy.attn_tp_degree
+        bw_ar = hardware.ici_ar_ag_bandwidth
+        data_size_attn = (batch_size / strategy.attn_dp_degree) * seq_len * config.hidden_size * config.bytes_per_param
+        latency_attn = 2 * ((P_attn - 1) / P_attn) * data_size_attn / 1e9 / bw_ar
+        
+        # 2. MoE A2A Routing (due to moe_ep=4 > 1)
+        ep_eff = strategy.moe_ep_degree
+        K = config.num_activated_experts
+        bw_a2a = hardware.ici_a2a_bandwidth
+        total_tokens = batch_size * seq_len
+        prob_visit_remote = 1 - (1 - 1 / ep_eff) ** K
+        data_size_a2a = (total_tokens / ep_eff) * (ep_eff - 1) * prob_visit_remote * config.hidden_size * config.bytes_per_param
+        latency_a2a = data_size_a2a / 1e9 / bw_a2a
+        
+        expected_latency = latency_attn + latency_a2a
         self.assertAlmostEqual(latency, expected_latency)
 
     def test_calculate_memory_access_prefill(self) -> None:

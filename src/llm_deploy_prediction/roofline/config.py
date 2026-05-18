@@ -73,6 +73,7 @@ class ShardingStrategy:
         attn_dp_degree: DP degree for attention.
         moe_tp_degree: TP degree for MoE.
         moe_ep_degree: EP degree for MoE.
+        moe_comm_type: Communication type for MoE ('a2a' or 'all_gather').
     '''
     
     num_chips: int
@@ -80,6 +81,7 @@ class ShardingStrategy:
     attn_dp_degree: int = 1
     moe_tp_degree: int = 1
     moe_ep_degree: int = 1
+    moe_comm_type: str = 'a2a'
 
 def load_model_config(file_path: str) -> ModelConfig:
     '''Loads ModelConfig from a JSON file.
