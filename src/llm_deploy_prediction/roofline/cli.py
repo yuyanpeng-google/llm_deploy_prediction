@@ -9,9 +9,9 @@ from dataclasses import asdict
 import glob
 import os
 import sys
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Tuple
 
-from llm_deploy_prediction.roofline.calculations import calculate_roofline
+from llm_deploy_prediction.roofline.calculations import calculate_roofline, RooflineResult
 from llm_deploy_prediction.roofline.config import (
     HardwareSpec,
     ModelConfig,
@@ -182,8 +182,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         )
         spec_paths.append("Default")
 
-    prefill_results = []
-    decode_results = []
+    prefill_results: List[Tuple[str, int, RooflineResult]] = []
+    decode_results: List[Tuple[str, int, RooflineResult]] = []
 
     for hw_spec, spec_path in zip(hw_specs, spec_paths):
         strategies = generate_strategies(hw_spec.num_chips)
