@@ -124,35 +124,44 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: Optional[List[str]] = None) -> None:
-    '''Main entry point for calculating roofline.
+def _load_model_cfg(args: argparse.Namespace) -> ModelConfig:
+    '''Loads model configuration from file or returns default values.
 
     Args:
-        argv: List of arguments to parse. If None, uses sys.argv.
+        args: Parsed command line arguments.
+
+    Returns:
+        ModelConfig instance.
     '''
-    args = parse_args(argv)
-
     if args.model_config:
-        model_cfg = load_model_config(args.model_config)
-    else:
-        print(
-            "Warning: No model config file provided. Using dummy values."
-        )
-        model_cfg = ModelConfig(
-            hidden_size=6144,
-            num_q_heads=96,
-            num_kv_heads=8,
-            attn_head_dim=128,
-            num_layers=62,
-            vocab_size=151936,
-            num_experts=160,
-            num_activated_experts=8,
-            intermediate_size=2560,
-            bytes_per_param=1,
-            attn_op_precision='bf16',
-            kv_cache_precision='fp8',
-        )
+        return load_model_config(args.model_config)
+    
+    print("Warning: No model config file provided. Using dummy values.")
+    return ModelConfig(
+        hidden_size=6144,
+        num_q_heads=96,
+        num_kv_heads=8,
+        attn_head_dim=128,
+        num_layers=62,
+        vocab_size=151936,
+        num_experts=160,
+        num_activated_experts=8,
+        intermediate_size=2560,
+        bytes_per_param=1,
+        attn_op_precision='bf16',
+        kv_cache_precision='fp8',
+    )
 
+
+def _load_hw_specs(args: argparse.Namespace) -> Tuple[List[HardwareSpec], List[str]]:
+    '''Loads hardware specifications from files or returns default values.
+
+    Args:
+        args: Parsed command line arguments.
+
+    Returns:
+        Tuple containing a list of HardwareSpec instances and a list of their paths/names.
+    '''
     hw_specs = []
     spec_paths = []
     if args.hardware_spec:
@@ -181,7 +190,26 @@ def main(argv: Optional[List[str]] = None) -> None:
             )
         )
         spec_paths.append("Default")
+    return hw_specs, spec_paths
 
+
+def _calculate_results(
+    model_cfg: ModelConfig,
+    hw_specs: List[HardwareSpec],
+    spec_paths: List[str],
+    args: argparse.Namespace,
+) -> Tuple[List[Tuple[str, int, RooflineResult]], List[Tuple[str, int, RooflineResult]]]:
+    '''Runs roofline calculations for all hardware specs and strategies.
+
+    Args:
+        model_cfg: Model configuration.
+        hw_specs: List of hardware specifications.
+        spec_paths: List of paths/names for hardware specs.
+        args: Parsed command line arguments.
+
+    Returns:
+        Tuple containing prefill results and decode results.
+    '''
     prefill_results: List[Tuple[str, int, RooflineResult]] = []
     decode_results: List[Tuple[str, int, RooflineResult]] = []
 
@@ -240,236 +268,296 @@ def main(argv: Optional[List[str]] = None) -> None:
             except ValueError as e:
                 print(f"Error calculating decode for {strategy_str}: {e}")
 
+    return prefill_results, decode_results
+
+
+def _print_prefill_table(results: List[Tuple[str, int, RooflineResult]]) -> None:
+    '''Prints prefill phase table.'''
+    print("\n=== Prefill Phase Table ===")
+    headers = [
+        "Strategy",
+        "Batch Size",
+        "Throughput/Chip",
+        "TTFT (ms)",
+        "Bound By",
+        "Total Latency (ms)",
+        "KV Cache (GB)",
+    ]
+    rows = []
+    for strategy_str, batch, res in results:
+        rows.append(
+            [
+                strategy_str,
+                batch,
+                f"{res.throughput_per_chip:.2f}",
+                f"{res.ttft_ms:.2f}",
+                res.bound_by,
+                f"{res.total_latency_ms:.2f}",
+                f"{res.kv_cache_size_gb:.2f}",
+            ]
+        )
+    print_markdown_table(headers, rows)
+
+
+def _print_decode_table(results: List[Tuple[str, int, RooflineResult]]) -> None:
+    '''Prints decode phase table.'''
+    print("\n=== Decode Phase Table ===")
+    headers = [
+        "Strategy",
+        "Batch Size",
+        "Throughput/Chip",
+        "TPOT (ms)",
+        "Bound By",
+        "Total Latency (ms)",
+        "KV Cache (GB)",
+    ]
+    rows = []
+    for strategy_str, batch, res in results:
+        rows.append(
+            [
+                strategy_str,
+                batch,
+                f"{res.throughput_per_chip:.2f}",
+                f"{res.tpot_ms:.2f}",
+                res.bound_by,
+                f"{res.total_latency_ms:.2f}",
+                f"{res.kv_cache_size_gb:.2f}",
+            ]
+        )
+    print_markdown_table(headers, rows)
+
+
+def _print_latency_table(
+    prefill_results: List[Tuple[str, int, RooflineResult]],
+    decode_results: List[Tuple[str, int, RooflineResult]],
+) -> None:
+    '''Prints latency comparison table.'''
+    print("\n=== Latency Comparison Table ===")
+    headers = [
+        "Strategy",
+        "Phase",
+        "Batch Size",
+        "Compute Latency (ms)",
+        "Memory Latency (ms)",
+        "ICI Latency (ms)",
+        "Gap (ms)",
+        "Bound By",
+    ]
+    rows = []
+    for strategy_str, batch, res in prefill_results:
+        gap = abs(res.compute_latency_ms - res.memory_latency_ms)
+        rows.append(
+            [
+                strategy_str,
+                "Prefill",
+                batch,
+                f"{res.compute_latency_ms:.2f}",
+                f"{res.memory_latency_ms:.2f}",
+                f"{res.comm_latency_ms:.2f}",
+                f"{gap:.2f}",
+                res.bound_by,
+            ]
+        )
+    for strategy_str, batch, res in decode_results:
+        gap = abs(res.compute_latency_ms - res.memory_latency_ms)
+        rows.append(
+            [
+                strategy_str,
+                "Decode",
+                batch,
+                f"{res.compute_latency_ms:.2f}",
+                f"{res.memory_latency_ms:.2f}",
+                f"{res.comm_latency_ms:.2f}",
+                f"{gap:.2f}",
+                res.bound_by,
+            ]
+        )
+    print_markdown_table(headers, rows)
+
+
+def _print_hbm_table(
+    prefill_results: List[Tuple[str, int, RooflineResult]],
+    decode_results: List[Tuple[str, int, RooflineResult]],
+) -> None:
+    '''Prints HBM usage table.'''
+    print("\n=== HBM Usage Table ===")
+    headers = [
+        "Strategy",
+        "Phase",
+        "Batch Size",
+        "Weights/Chip (GB)",
+        "KV Cache/Chip (GB)",
+        "Total HBM/Chip (GB)",
+        "Capacity (GB)",
+        "Util (%)",
+    ]
+    rows = []
+    for strategy_str, batch, res in prefill_results:
+        util = (
+            (res.hbm_usage_gb / res.hbm_capacity_gb) * 100
+            if res.hbm_capacity_gb > 0
+            else 0.0
+        )
+        rows.append(
+            [
+                strategy_str,
+                "Prefill",
+                batch,
+                f"{res.weights_per_chip_gb:.2f}",
+                f"{res.kv_cache_per_chip_gb:.2f}",
+                f"{res.hbm_usage_gb:.2f}",
+                f"{res.hbm_capacity_gb:.2f}",
+                f"{util:.2f}",
+            ]
+        )
+    for strategy_str, batch, res in decode_results:
+        util = (
+            (res.hbm_usage_gb / res.hbm_capacity_gb) * 100
+            if res.hbm_capacity_gb > 0
+            else 0.0
+        )
+        rows.append(
+            [
+                strategy_str,
+                "Decode",
+                batch,
+                f"{res.weights_per_chip_gb:.2f}",
+                f"{res.kv_cache_per_chip_gb:.2f}",
+                f"{res.hbm_usage_gb:.2f}",
+                f"{res.hbm_capacity_gb:.2f}",
+                f"{util:.2f}",
+            ]
+        )
+    print_markdown_table(headers, rows)
+
+
+def _print_sorted_prefill_table(results: List[Tuple[str, int, RooflineResult]]) -> None:
+    '''Prints prefill throughput sorted table.'''
+    print("\n=== Prefill Throughput/Chip Sorted Table ===")
+    headers = [
+        "Strategy",
+        "Batch Size",
+        "Throughput/Chip",
+        "Total Latency (ms)",
+        "Bound By",
+        "HBM Util (%)",
+    ]
+
+    sorted_results = sorted(
+        results,
+        key=lambda x: x[2].throughput_per_chip,
+        reverse=True,
+    )
+    rows = []
+    for strategy_str, batch, res in sorted_results:
+        util = (
+            (res.hbm_usage_gb / res.hbm_capacity_gb) * 100
+            if res.hbm_capacity_gb > 0
+            else 0.0
+        )
+        rows.append(
+            [
+                strategy_str,
+                batch,
+                f"{res.throughput_per_chip:.2f}",
+                f"{res.total_latency_ms:.2f}",
+                res.bound_by,
+                f"{util:.2f}",
+            ]
+        )
+    print_markdown_table(headers, rows)
+
+
+def _print_sorted_decode_table(results: List[Tuple[str, int, RooflineResult]]) -> None:
+    '''Prints decode throughput sorted table.'''
+    print("\n=== Decode Throughput/Chip Sorted Table ===")
+    headers = [
+        "Strategy",
+        "Batch Size",
+        "Throughput/Chip",
+        "Total Latency (ms)",
+        "Bound By",
+        "HBM Util (%)",
+    ]
+
+    sorted_results = sorted(
+        results,
+        key=lambda x: x[2].throughput_per_chip,
+        reverse=True,
+    )
+    rows = []
+    for strategy_str, batch, res in sorted_results:
+        util = (
+            (res.hbm_usage_gb / res.hbm_capacity_gb) * 100
+            if res.hbm_capacity_gb > 0
+            else 0.0
+        )
+        rows.append(
+            [
+                strategy_str,
+                batch,
+                f"{res.throughput_per_chip:.2f}",
+                f"{res.total_latency_ms:.2f}",
+                res.bound_by,
+                f"{util:.2f}",
+            ]
+        )
+    print_markdown_table(headers, rows)
+
+
+def _print_detailed_results(
+    prefill_results: List[Tuple[str, int, RooflineResult]],
+    decode_results: List[Tuple[str, int, RooflineResult]],
+    seq_len: int,
+) -> None:
+    '''Prints detailed results in non-table format.'''
+    for strategy_str, prefill_batch, res in prefill_results:
+        print(f"\n=== Strategy: {strategy_str} ===")
+        print(f"--- Prefill Phase (Seq Len {seq_len}, Batch {prefill_batch}) ---")
+        for k, v in asdict(res).items():
+            print(f"{k}: {v}")
+
+    for strategy_str, decode_batch, res in decode_results:
+        print(f"\n=== Strategy: {strategy_str} ===")
+        print(f"--- Decode Phase (Seq Len {seq_len}, Batch {decode_batch}, 1 step) ---")
+        for k, v in asdict(res).items():
+            print(f"{k}: {v}")
+
+
+def _print_results(
+    prefill_results: List[Tuple[str, int, RooflineResult]],
+    decode_results: List[Tuple[str, int, RooflineResult]],
+    args: argparse.Namespace,
+) -> None:
+    '''Prints the results in markdown tables or detailed format.'''
     if args.table:
-        print("\n=== Prefill Phase Table ===")
-        headers = [
-            "Strategy",
-            "Batch Size",
-            "Throughput/Chip",
-            "TTFT (ms)",
-            "Bound By",
-            "Total Latency (ms)",
-            "KV Cache (GB)",
-        ]
-        rows = []
-        for strategy_str, batch, res in prefill_results:
-            rows.append(
-                [
-                    strategy_str,
-                    batch,
-                    f"{res.throughput_per_chip:.2f}",
-                    f"{res.ttft_ms:.2f}",
-                    res.bound_by,
-                    f"{res.total_latency_ms:.2f}",
-                    f"{res.kv_cache_size_gb:.2f}",
-                ]
-            )
-        print_markdown_table(headers, rows)
-
-        print("\n=== Decode Phase Table ===")
-        headers = [
-            "Strategy",
-            "Batch Size",
-            "Throughput/Chip",
-            "TPOT (ms)",
-            "Bound By",
-            "Total Latency (ms)",
-            "KV Cache (GB)",
-        ]
-        rows = []
-        for strategy_str, batch, res in decode_results:
-            rows.append(
-                [
-                    strategy_str,
-                    batch,
-                    f"{res.throughput_per_chip:.2f}",
-                    f"{res.tpot_ms:.2f}",
-                    res.bound_by,
-                    f"{res.total_latency_ms:.2f}",
-                    f"{res.kv_cache_size_gb:.2f}",
-                ]
-            )
-        print_markdown_table(headers, rows)
-
-        print("\n=== Latency Comparison Table ===")
-        headers = [
-            "Strategy",
-            "Phase",
-            "Batch Size",
-            "Compute Latency (ms)",
-            "Memory Latency (ms)",
-            "ICI Latency (ms)",
-            "Gap (ms)",
-            "Bound By",
-        ]
-        rows = []
-        for strategy_str, batch, res in prefill_results:
-            gap = abs(
-                res.compute_latency_ms - res.memory_latency_ms
-            )
-            rows.append(
-                [
-                    strategy_str,
-                    "Prefill",
-                    batch,
-                    f"{res.compute_latency_ms:.2f}",
-                    f"{res.memory_latency_ms:.2f}",
-                    f"{res.comm_latency_ms:.2f}",
-                    f"{gap:.2f}",
-                    res.bound_by,
-                ]
-            )
-        for strategy_str, batch, res in decode_results:
-            gap = abs(
-                res.compute_latency_ms - res.memory_latency_ms
-            )
-            rows.append(
-                [
-                    strategy_str,
-                    "Decode",
-                    batch,
-                    f"{res.compute_latency_ms:.2f}",
-                    f"{res.memory_latency_ms:.2f}",
-                    f"{res.comm_latency_ms:.2f}",
-                    f"{gap:.2f}",
-                    res.bound_by,
-                ]
-            )
-        print_markdown_table(headers, rows)
-
-        print("\n=== HBM Usage Table ===")
-        headers = [
-            "Strategy",
-            "Phase",
-            "Batch Size",
-            "Weights/Chip (GB)",
-            "KV Cache/Chip (GB)",
-            "Total HBM/Chip (GB)",
-            "Capacity (GB)",
-            "Util (%)",
-        ]
-        rows = []
-        for strategy_str, batch, res in prefill_results:
-            util = (
-                (res.hbm_usage_gb / res.hbm_capacity_gb) * 100
-                if res.hbm_capacity_gb > 0
-                else 0.0
-            )
-            rows.append(
-                [
-                    strategy_str,
-                    "Prefill",
-                    batch,
-                    f"{res.weights_per_chip_gb:.2f}",
-                    f"{res.kv_cache_per_chip_gb:.2f}",
-                    f"{res.hbm_usage_gb:.2f}",
-                    f"{res.hbm_capacity_gb:.2f}",
-                    f"{util:.2f}",
-                ]
-            )
-        for strategy_str, batch, res in decode_results:
-            util = (
-                (res.hbm_usage_gb / res.hbm_capacity_gb) * 100
-                if res.hbm_capacity_gb > 0
-                else 0.0
-            )
-            rows.append(
-                [
-                    strategy_str,
-                    "Decode",
-                    batch,
-                    f"{res.weights_per_chip_gb:.2f}",
-                    f"{res.kv_cache_per_chip_gb:.2f}",
-                    f"{res.hbm_usage_gb:.2f}",
-                    f"{res.hbm_capacity_gb:.2f}",
-                    f"{util:.2f}",
-                ]
-            )
-        print_markdown_table(headers, rows)
-
-        print("\n=== Prefill Throughput/Chip Sorted Table ===")
-        headers = [
-            "Strategy",
-            "Batch Size",
-            "Throughput/Chip",
-            "Total Latency (ms)",
-            "Bound By",
-            "HBM Util (%)",
-        ]
-
-        prefill_sorted = sorted(
-            prefill_results,
-            key=lambda x: x[2].throughput_per_chip,
-            reverse=True,
-        )
-        rows = []
-        for strategy_str, batch, res in prefill_sorted:
-            util = (
-                (res.hbm_usage_gb / res.hbm_capacity_gb) * 100
-                if res.hbm_capacity_gb > 0
-                else 0.0
-            )
-            rows.append(
-                [
-                    strategy_str,
-                    batch,
-                    f"{res.throughput_per_chip:.2f}",
-                    f"{res.total_latency_ms:.2f}",
-                    res.bound_by,
-                    f"{util:.2f}",
-                ]
-            )
-        print_markdown_table(headers, rows)
-
-        print("\n=== Decode Throughput/Chip Sorted Table ===")
-        headers = [
-            "Strategy",
-            "Batch Size",
-            "Throughput/Chip",
-            "Total Latency (ms)",
-            "Bound By",
-            "HBM Util (%)",
-        ]
-
-        decode_sorted = sorted(
-            decode_results,
-            key=lambda x: x[2].throughput_per_chip,
-            reverse=True,
-        )
-        rows = []
-        for strategy_str, batch, res in decode_sorted:
-            util = (
-                (res.hbm_usage_gb / res.hbm_capacity_gb) * 100
-                if res.hbm_capacity_gb > 0
-                else 0.0
-            )
-            rows.append(
-                [
-                    strategy_str,
-                    batch,
-                    f"{res.throughput_per_chip:.2f}",
-                    f"{res.total_latency_ms:.2f}",
-                    res.bound_by,
-                    f"{util:.2f}",
-                ]
-            )
-        print_markdown_table(headers, rows)
+        _print_prefill_table(prefill_results)
+        _print_decode_table(decode_results)
+        _print_latency_table(prefill_results, decode_results)
+        _print_hbm_table(prefill_results, decode_results)
+        _print_sorted_prefill_table(prefill_results)
+        _print_sorted_decode_table(decode_results)
     else:
-        for strategy_str, prefill_batch, res in prefill_results:
-            print(f"\n=== Strategy: {strategy_str} ===")
-            print(
-                f"--- Prefill Phase (Seq Len {args.seq_len}, Batch {prefill_batch}) ---"
-            )
-            for k, v in asdict(res).items():
-                print(f"{k}: {v}")
+        _print_detailed_results(prefill_results, decode_results, args.seq_len)
 
-        for strategy_str, decode_batch, res in decode_results:
-            print(f"\n=== Strategy: {strategy_str} ===")
-            print(
-                f"--- Decode Phase (Seq Len {args.seq_len}, Batch {decode_batch}, 1 step) ---"
-            )
-            for k, v in asdict(res).items():
-                print(f"{k}: {v}")
+
+def main(argv: Optional[List[str]] = None) -> None:
+    '''Main entry point for calculating roofline.
+
+    Args:
+        argv: List of arguments to parse. If None, uses sys.argv.
+    '''
+    args = parse_args(argv)
+
+    model_cfg = _load_model_cfg(args)
+
+    hw_specs, spec_paths = _load_hw_specs(args)
+
+    prefill_results, decode_results = _calculate_results(
+        model_cfg, hw_specs, spec_paths, args
+    )
+
+    _print_results(prefill_results, decode_results, args)
 
 
 if __name__ == '__main__':
