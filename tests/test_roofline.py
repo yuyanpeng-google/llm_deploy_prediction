@@ -6,18 +6,15 @@ This module contains tests to verify the calculations in roofline.py.
 import unittest
 from typing import Dict, Any
 
-from llm_deploy_prediction.roofline.roofline import (
-    ModelConfig,
-    HardwareSpec,
-    ShardingStrategy,
+from llm_deploy_prediction.roofline.config import ModelConfig, HardwareSpec, ShardingStrategy
+from llm_deploy_prediction.roofline.calculations import (
     calculate_attention_flops,
     calculate_moe_flops,
     calculate_memory_access,
     calculate_communication_latency,
     calculate_roofline,
-    parse_args,
-    main,
 )
+from llm_deploy_prediction.roofline.cli import parse_args, main
 
 def get_default_config(**kwargs) -> ModelConfig:
     '''Returns a default ModelConfig for testing.'''

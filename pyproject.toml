@@ -16,4 +16,4 @@ classifiers = [
 where = ["src"]
 
 [project.scripts]
-roofline = "llm_deploy_prediction.roofline.roofline:main"
+llm_deploy_prediction = "llm_deploy_prediction.cli:main"
