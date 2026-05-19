@@ -95,7 +95,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     prefill_group.add_argument(
         '--prefill_local_batch_size',
         type=int,
-        help='Local batch size per DP group for prefill phase. Conflicts with --prefill_batch_size.',
+        help='Local batch size per chip for prefill phase. Conflicts with --prefill_batch_size.',
     )
 
     decode_group = parser.add_mutually_exclusive_group()
@@ -108,7 +108,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     decode_group.add_argument(
         '--decode_local_batch_size',
         type=int,
-        help='Local batch size per DP group for decode phase. Conflicts with --decode_batch_size.',
+        help='Local batch size per chip for decode phase. Conflicts with --decode_batch_size.',
     )
 
     parser.add_argument(
@@ -226,14 +226,14 @@ def _calculate_results(
 
             if args.prefill_local_batch_size is not None:
                 prefill_batch = (
-                    args.prefill_local_batch_size * strategy.attn_dp_degree
+                    args.prefill_local_batch_size * strategy.num_chips
                 )
             else:
                 prefill_batch = args.prefill_batch_size
 
             if args.decode_local_batch_size is not None:
                 decode_batch = (
-                    args.decode_local_batch_size * strategy.attn_dp_degree
+                    args.decode_local_batch_size * strategy.num_chips
                 )
             else:
                 decode_batch = args.decode_batch_size
