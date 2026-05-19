@@ -298,7 +298,7 @@ def calculate_communication_latency(
     # MoE Communication - Phase 2: After MoE (Unrouting/Reduction)
     if moe_comm_type == 'all_gather' and bw_link_ar > 0 and (strategy.moe_ep_degree > 1 or strategy.moe_tp_degree > 1):
         # Option A: Full size All-Reduce for both TP and EP
-        G = strategy.moe_ep_degree if strategy.moe_ep_degree > 1 else strategy.attn_dp_degree
+        G = strategy.num_chips
         data_size = B * S * H * bytes_per_param
         comm_latency += 2 * ((G - 1) / G) * data_size / 1e9 / bw_link_ar
             
